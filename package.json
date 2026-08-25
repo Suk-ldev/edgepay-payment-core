@@ -1,0 +1,26 @@
+{
+  "name": "@edgepay/payment-core",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "EdgePay 支付 Worker 程序本体与免费插件。仅供查看源码：不含付费插件与商业入口，无法独立构建出可部署的 Worker。",
+  "exports": {
+    ".": "./src/index.js",
+    "./plugin-api": "./src/plugin-api.js",
+    "./admin-fields": "./src/admin-fields.js",
+    "./poller-runtime": "./src/core/poller-runtime.js",
+    "./runtime-settings": "./src/runtime-settings.js",
+    "./plugin-config": "./src/core/plugin-config.js",
+    "./channels": "./src/channels.js",
+    "./alipay": "./src/alipay-plugin.js",
+    "./wechat": "./src/wechat-v2-plugin.js",
+    "./free-plugins": "./src/free-plugins/index.js"
+  },
+  "scripts": {
+    "assets:build": "node scripts/generate-bundled-assets.mjs",
+    "assets:verify": "node scripts/generate-bundled-assets.mjs --check",
+    "test": "npm run assets:verify && node --test",
+    "check": "npm run assets:verify && node scripts/check-syntax.mjs",
+    "db:apply": "wrangler d1 execute DB --remote --file=./schema.sql"
+  }
+}

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#242424" />
+    <title>EdgePay · 管理后台登录</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="ui-login-page">
+    <main class="ui-login-card">
+      <section class="ui-login-banner" aria-label="EdgePay 管理后台">
+        <div class="ui-banner-brand"><span class="ui-logo-mark">E</span><strong>管理后台</strong></div>
+        <svg class="ui-login-art" viewBox="0 0 620 340" role="img" aria-label="支付数据管理示意图">
+          <ellipse cx="316" cy="284" rx="220" ry="18" fill="#111319" opacity=".55"/>
+          <path d="M423 70c92 5 126 70 101 146-17 50-68 67-145 59-61-6-110-58-96-118 13-56 52-92 140-87z" fill="#70798e"/>
+          <path d="M130 170c-35 21-45 79-11 113 47 47 135 11 127-49-6-48-69-88-116-64z" fill="#5c6577"/>
+          <rect x="196" y="77" width="275" height="206" rx="15" fill="#f5f7ff" stroke="#151923" stroke-width="3"/>
+          <path d="M196 91c0-8 6-14 15-14h245c8 0 15 6 15 14v21H196z" fill="#3753db"/>
+          <circle cx="216" cy="88" r="6" fill="#ff6565"/><circle cx="236" cy="88" r="6" fill="#ffd34a"/><circle cx="256" cy="88" r="6" fill="#4de1d2"/>
+          <rect x="226" y="123" width="106" height="10" rx="5" fill="#50ded0" stroke="#293544" stroke-width="1.5"/>
+          <rect x="226" y="147" width="106" height="11" rx="5" fill="#3753db"/><rect x="226" y="170" width="106" height="11" rx="5" fill="#3753db"/>
+          <path d="M375 126h60M375 140h60M375 154h41M375 168h60" stroke="#6d7280" stroke-width="2" opacity=".7"/>
+          <circle cx="406" cy="214" r="37" fill="#4bdcd0" stroke="#283142" stroke-width="2"/><path d="M406 177v37h37" fill="#3753db"/><path d="M406 214l-25 26" stroke="#f6f7ff" stroke-width="2"/>
+          <rect x="112" y="220" width="132" height="88" rx="12" fill="#3156e8" stroke="#1b2341" stroke-width="3"/>
+          <path d="M142 242v44M167 242v44M192 242v44M217 242v44" stroke="#f4f8ff" stroke-width="8" stroke-linecap="round"/><path d="M142 274v12M167 274v12M192 274v12M217 274v12" stroke="#4be0d1" stroke-width="8" stroke-linecap="round"/>
+          <rect x="431" y="112" width="107" height="57" rx="11" fill="#3156e8"/><path d="M449 153l18-18 14 13 29-28" fill="none" stroke="#eaf2ff" stroke-width="3"/><path d="M517 130l-7 2 2 7" fill="none" stroke="#eaf2ff" stroke-width="2"/>
+          <rect x="273" y="198" width="95" height="57" rx="9" fill="#fff" stroke="#303849" stroke-width="2"/><rect x="287" y="213" width="29" height="28" rx="4" fill="#51ded0" stroke="#293544" stroke-width="2"/><path d="M326 217h28M326 228h28M326 239h19" stroke="#555d6d" stroke-width="2"/>
+          <path d="M71 191l49 39-11 13-49-39z" fill="#53dfd3" stroke="#1d2632" stroke-width="2"/><path d="M57 183c8-5 17 0 21 7l-14 13c-7-6-12-14-7-20z" fill="#f3f7ff" stroke="#1d2632" stroke-width="2"/>
+          <path d="M449 248l11-20 11 20 19 5-14 14 3 20-18-9-18 9 3-20-14-14z" fill="#ff6969" stroke="#282d39" stroke-width="2"/>
+        </svg>
+      </section>
+      <section class="ui-login-form-panel">
+        <form class="ui-login-form" action="/admin/login" method="post">
+          <label class="ui-input">
+            <span class="ui-input-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.25"/><path d="M5.5 19c.4-4 2.7-6 6.5-6s6.1 2 6.5 6"/></svg></span>
+            <input name="username" value="admin" autocomplete="username" placeholder="请输入管理员账号" required />
+          </label>
+          <label class="ui-input">
+            <span class="ui-input-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></span>
+            <input id="admin-password" name="password" type="password" autocomplete="current-password" placeholder="请输入管理员密码" required />
+            <button id="password-toggle" class="ui-eye" type="button" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.4-5 9.5-5 9.5 5 9.5 5-3.4 5-9.5 5-9.5-5-9.5-5Z"/><circle cx="12" cy="12" r="2.5"/></svg></button>
+          </label>
+          <div class="ui-captcha-row"><label class="ui-input"><input id="captcha-input" name="captcha" autocomplete="off" placeholder="请输入验证码" required /></label><button id="captcha-code" class="ui-captcha" type="button" aria-label="刷新验证码"><img src="/admin/captcha" alt="点击刷新验证码" /></button></div>
+          <p id="login-error" class="ui-login-error" aria-live="polite" aria-hidden="true">账号、密码或验证码不正确</p>
+          <button class="ui-login-submit" type="submit">登录管理后台</button>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/admin-login.js"></script>
+  </body>
+</html>

@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f3f7fc" />
+    <title>EdgePay · 管理后台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="ui-admin-shell">
+    <aside class="ui-sidebar">
+      <a class="ui-admin-brand" href="/admin" aria-label="EdgePay 管理后台">
+        <span class="ui-logo-mark">E</span>
+        <span>EdgePay<small>PAYMENT CONSOLE</small></span>
+      </a>
+      <p class="ui-nav-label">工作台</p>
+      <nav class="ui-admin-nav" aria-label="后台导航">
+        <a href="/admin/site" data-section-link="site">收银台设置</a>
+        <a href="/admin/plugins" data-section-link="plugins">插件配置</a>
+        <a href="/admin/channels" data-section-link="channels">通道管理</a>
+        <a href="/admin/orders" data-section-link="orders">支付订单</a>
+        <a href="/admin/keys" data-section-link="keys">密钥管理</a>
+        <a href="/admin/docs" data-section-link="docs">使用文档</a>
+      </nav>
+      <div class="ui-sidebar-foot"><span>SERVERLESS</span><span>EPAY V1</span></div>
+    </aside>
+    <main class="ui-admin-main">
+      <header class="ui-admin-header">
+        <div><p class="ui-kicker">EDGEPAY / PLATFORM</p><h1 id="admin-page-title">收银台设置</h1></div>
+        <div class="ui-user"><span class="ui-online-dot" aria-hidden="true"></span>管理会话有效<form action="/admin/logout" method="post"><button type="submit">退出登录</button></form></div>
+      </header>
+
+      <section id="site" class="ui-section">
+        <div class="ui-section-heading">
+          <div><h2>收银台设置</h2></div>
+          <p>商户名称会显示在收银台顶部；所有新订单按这里的分钟数超时，默认 5 分钟。</p>
+        </div>
+        <form id="site-form" class="ui-config-editor">
+          <div class="ui-config-grid">
+            <label class="ui-config-field" for="site-merchant-name">
+              <span>商户名称</span>
+              <input id="site-merchant-name" name="merchant_name" maxlength="80" autocomplete="organization" required />
+            </label>
+            <label class="ui-config-field" for="site-order-expire-minutes">
+              <span>订单超时时间（分钟）</span>
+              <input id="site-order-expire-minutes" name="order_expire_minutes" type="number" min="1" max="30" step="1" value="5" required />
+            </label>
+            <label class="ui-config-field ui-config-wide" for="site-cashier-footer-html">
+              <span>收银台底部 HTML</span>
+              <textarea id="site-cashier-footer-html" name="cashier_footer_html" rows="7" maxlength="10000" placeholder="例如：&lt;a class=&quot;cashier-footer-button&quot; href=&quot;https://t.me/yourname&quot; target=&quot;_blank&quot;&gt;联系客服&lt;/a&gt;"></textarea>
+              <small>显示在支付卡片下方。支持文字、链接、按钮式链接和图片；禁止脚本、事件属性、iframe、表单和内联 style。推荐使用 class=&quot;cashier-footer-button&quot;。</small>
+            </label>
+            <fieldset class="ui-contact-settings ui-config-wide">
+              <legend>微信客服页</legend>
+              <div class="ui-contact-heading">
+                <label class="ui-switch">
+                  <input id="site-contact-enabled" name="contact_enabled" type="checkbox" />
+                  <span>启用公开客服页</span>
+                </label>
+                <div class="ui-contact-url">
+                  <input id="site-contact-url" type="url" readonly aria-label="客服页地址" />
+                  <button type="button" data-copy-contact-url>复制地址</button>
+                  <a id="site-contact-open" href="/contact" target="_blank" rel="noopener">打开页面</a>
+                </div>
+              </div>
+              <div class="ui-config-grid ui-contact-grid">
+                <label class="ui-config-field" for="site-contact-title">
+                  <span>联系提示</span>
+                  <input id="site-contact-title" name="contact_title" maxlength="80" placeholder="添加我的企业微信与我联系吧" />
+                </label>
+                <label class="ui-config-field" for="site-contact-qr-label">
+                  <span>二维码提示</span>
+                  <input id="site-contact-qr-label" name="contact_qr_label" maxlength="40" placeholder="手机微信扫码添加好友" />
+                </label>
+                <div class="ui-config-field">
+                  <span>客服头像</span>
+                  <div class="ui-image-upload" data-image-upload="contact_avatar_image" data-image-kind="avatar">
+                    <div class="ui-image-preview ui-avatar-preview"><img alt="客服头像预览" /></div>
+                    <input name="contact_avatar_image" type="hidden" />
+                    <input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" />
+                    <div><button type="button" data-upload-image>上传头像</button><button type="button" data-remove-image>恢复默认</button></div>
+                  </div>
+                  <small>PNG、JPEG 或 WebP；上传后会在浏览器内压缩。</small>
+                </div>
+                <div class="ui-config-field">
+                  <span>客服二维码</span>
+                  <div class="ui-image-upload" data-image-upload="contact_qrcode_image" data-image-kind="qrcode">
+                    <div class="ui-image-preview ui-qrcode-preview"><img alt="客服二维码预览" /></div>
+                    <input name="contact_qrcode_image" type="hidden" />
+                    <input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" />
+                    <div><button type="button" data-upload-image>上传二维码</button><button type="button" data-remove-image>移除</button></div>
+                  </div>
+                  <small>建议使用清晰的正方形二维码；未上传时公开页不会显示联系码。</small>
+                </div>
+              </div>
+            </fieldset>
+          </div>
+          <div class="ui-config-actions">
+            <span></span>
+            <button id="save-site" type="submit">保存收银台设置</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="plugins" class="ui-section" hidden>
+        <div class="ui-section-heading"><div><h2>插件配置</h2></div></div>
+        <!-- 已购但当前 Worker 里没有的插件：按权益出货后新增插件需要回 Deploy 站升级一次。 -->
+        <div id="plugins-pending-install" hidden></div>
+        <form id="plugin-filters" class="ui-plugin-filters">
+          <label>
+            <span>搜索插件</span>
+            <input id="plugin-keyword" name="keyword" type="search" autocomplete="off" placeholder="插件名称、编码或支付方式" />
+          </label>
+          <label>
+            <span>启用状态</span>
+            <select id="plugin-status-filter" name="status">
+              <option value="licensed" selected>已购买</option>
+              <option value="unlicensed">未购买</option>
+              <option value="">全部插件</option>
+              <option value="enabled">已启用</option>
+              <option value="disabled">已停用</option>
+              <option value="incomplete">配置不完整</option>
+            </select>
+          </label>
+        </form>
+        <div class="ui-table-wrap"><table><thead><tr><th>插件</th><th>支付方式</th><th>类型</th><th>状态</th><th>说明</th><th>操作</th></tr></thead><tbody id="plugins-body"><tr><td class="ui-empty" colspan="6">正在读取插件配置…</td></tr></tbody></table></div>
+        <section id="plugin-editor" class="ui-config-editor" hidden aria-labelledby="plugin-editor-title">
+          <header><div><h3 id="plugin-editor-title">编辑插件</h3></div><button id="plugin-editor-close" type="button">收起</button></header>
+          <form id="plugin-form"><div id="plugin-fields" class="ui-config-grid"></div><div class="ui-config-actions"><span id="plugin-save-note">密码字段留空即保留原值</span><button type="submit">保存插件配置</button></div></form>
+        </section>
+      </section>
+
+      <section id="channels" class="ui-section" hidden>
+        <div class="ui-section-heading"><div><h2>通道管理与权重</h2></div><div class="ui-heading-actions"><p>通道 ID 仍是 <code>/api/pay/{channel_id}/notify</code> 的一部分，不可在此改号。</p><button id="open-channel-create" class="ui-secondary-action" type="button">新增支付通道</button><button id="save-channels" type="button">保存通道路由</button></div></div>
+        <form id="channel-filters" class="ui-list-filters">
+          <label>
+            <span>搜索通道</span>
+            <input name="keyword" type="search" autocomplete="off" placeholder="通道名称、插件编码或支付方式" />
+          </label>
+          <label>
+            <span>启用状态</span>
+            <select name="status">
+              <option value="">全部通道</option>
+              <option value="enabled">已启用</option>
+              <option value="disabled">已停用</option>
+              <option value="plugin_disabled">插件已停用</option>
+            </select>
+          </label>
+        </form>
+        <div class="ui-table-wrap"><table><thead><tr><th>ID</th><th>通道</th><th>插件</th><th>支付方式</th><th>权重</th><th>订单有效期</th><th>状态</th><th>操作</th></tr></thead><tbody id="channels-body"><tr><td class="ui-empty" colspan="8">正在读取通道配置…</td></tr></tbody></table></div>
+      </section>
+
+      <section id="orders" class="ui-section" hidden>
+        <div class="ui-section-heading"><div><h2>支付订单</h2></div><button id="refresh" type="button">刷新数据</button></div>
+        <form id="order-filters" class="ui-order-filters">
+          <label>
+            <span>搜索字段</span>
+            <select id="order-search-field" name="search_field">
+              <option value="all">全部订单号</option>
+              <option value="external_order_no">商户订单号</option>
+              <option value="payment_no">支付单号</option>
+              <option value="provider_trade_no">上游流水号</option>
+            </select>
+          </label>
+          <label class="ui-order-keyword">
+            <span>关键词</span>
+            <input id="order-keyword" name="keyword" autocomplete="off" placeholder="输入对应订单号" />
+          </label>
+          <label>
+            <span>插件</span>
+            <select id="order-plugin-filter" name="plugin_code"><option value="">全部插件</option></select>
+          </label>
+          <label>
+            <span>支付状态</span>
+            <select id="order-status-filter" name="status">
+              <option value="">全部状态</option>
+              <option value="PENDING">待创建</option>
+              <option value="PAYING">支付中</option>
+              <option value="PAID">成功</option>
+              <option value="FAILED">失败</option>
+              <option value="CLOSED">关闭</option>
+              <option value="EXPIRED">超时</option>
+            </select>
+          </label>
+          <label>
+            <span>回调状态</span>
+            <select id="order-callback-filter" name="callback_status">
+              <option value="">全部状态</option>
+              <option value="NONE">未回调</option>
+              <option value="PROCESSING">处理中</option>
+              <option value="SUCCESS">成功</option>
+              <option value="FAILED">失败</option>
+            </select>
+          </label>
+          <div class="ui-order-filter-actions">
+            <button type="submit">查询</button>
+            <button id="order-filter-reset" type="button">重置</button>
+          </div>
+        </form>
+        <div class="ui-order-result-head"><span id="orders-summary">正在读取订单…</span></div>
+        <div class="ui-table-wrap ui-order-table-wrap">
+          <table class="ui-orders-table">
+            <colgroup>
+              <col class="ui-order-col-merchant" />
+              <col class="ui-order-col-channel" />
+              <col class="ui-order-col-amount" />
+              <col class="ui-order-col-payment" />
+              <col class="ui-order-col-callback" />
+              <col class="ui-order-col-callback-count" />
+              <col class="ui-order-col-notify" />
+              <col class="ui-order-col-listener" />
+              <col class="ui-order-col-refundable" />
+              <col class="ui-order-col-created" />
+              <col class="ui-order-col-actions" />
+            </colgroup>
+            <thead><tr><th>商户订单</th><th>支付通道</th><th>支付金额</th><th>支付状态</th><th>回调状态</th><th>回调次数</th><th>通知状态</th><th>监听来源</th><th>可退金额</th><th>创建时间</th><th>操作</th></tr></thead>
+            <tbody id="orders-body"><tr><td class="ui-empty" colspan="11">正在读取订单…</td></tr></tbody>
+          </table>
+        </div>
+        <footer class="ui-order-pagination" aria-label="订单分页">
+          <label>每页
+            <select id="orders-page-size">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+            条
+          </label>
+          <div>
+            <button id="orders-prev-page" type="button">上一页</button>
+            <span id="orders-page-state">第 1 / 1 页</span>
+            <button id="orders-next-page" type="button">下一页</button>
+          </div>
+        </footer>
+      </section>
+
+      <section id="keys" class="ui-section" hidden>
+        <div class="ui-section-heading">
+          <div><h2>密钥管理</h2></div>
+          <p>轮换后旧密钥保留 30 分钟兼容期。新密钥只显示一次，请先复制并更新调用端。</p>
+        </div>
+        <div id="key-cards" class="ui-key-grid">
+          <article class="ui-key-card" data-key-card="epay">
+            <header><div><h3>ePay V1 商户密钥</h3><p>用于提交订单、查询订单和签名通知。</p></div><span class="ui-key-state">读取中</span></header>
+            <dl><div><dt>指纹</dt><dd data-key-fingerprint>—</dd></div><div><dt>上次轮换</dt><dd data-key-rotated>—</dd></div><div><dt>旧密钥有效至</dt><dd data-key-previous>无</dd></div></dl>
+            <footer><button type="button" data-rotate-key="epay">轮换密钥</button><button type="button" data-revoke-key="epay">撤销旧密钥</button></footer>
+          </article>
+          <article class="ui-key-card" data-key-card="watcher">
+            <header><div><h3>Watcher 传输密钥</h3><p>用于 Docker Watcher 拉取订单快照及没有独立插件密钥的监听通知。</p></div><span class="ui-key-state">读取中</span></header>
+            <dl><div><dt>指纹</dt><dd data-key-fingerprint>—</dd></div><div><dt>上次轮换</dt><dd data-key-rotated>—</dd></div><div><dt>旧密钥有效至</dt><dd data-key-previous>无</dd></div></dl>
+            <footer><button type="button" data-rotate-key="watcher">轮换密钥</button><button type="button" data-revoke-key="watcher">撤销旧密钥</button></footer>
+          </article>
+        </div>
+      </section>
+
+      <section id="docs" class="ui-section" hidden>
+        <div class="ui-section-heading"><div><h2>使用文档</h2></div><p>下面的地址按当前站点生成，可直接复制。</p></div>
+        <div class="ui-docs">
+          <details open>
+            <summary>ePay V1 接入</summary>
+            <div class="ui-doc-body">
+              <p>商户 ID 为 <code>1000</code>。兼容 <code>/submit.php</code>、<code>/mapi.php</code> 和 <code>/api.php</code>，签名方式保持 ePay V1 的 MD5 规则。密钥从上方“密钥管理”复制。</p>
+              <p>将原系统支付地址改为本站域名即可，订单号、异步通知、同步返回与查询参数不需要另写一套。</p>
+            </div>
+          </details>
+          <details>
+            <summary>微信官方 V2 支付产品</summary>
+            <div class="ui-doc-body">
+              <p>插件保留一个 <code>wechat_api</code>，按支付环境选择产品，不需要更换 ePay V1 接口。先在微信商户平台开通产品，再在插件配置勾选相同产品并填写对应 AppID。</p>
+              <ul>
+                <li><strong>Native：</strong><code>device=pc</code>，统一下单返回二维码。</li>
+                <li><strong>H5：</strong><code>device=mobile</code>、<code>qq</code>、<code>alipay</code> 或 <code>jump</code>，需配置已经登记的 H5 网站 URL。</li>
+                <li><strong>JSAPI：</strong><code>device=wechat</code>。可随订单传 <code>openid</code>；留空时需配置公众号 AppID 与 AppSecret，由收银台走 <code>snsapi_base</code> 自动授权。</li>
+                <li><strong>小程序：</strong>随订单传 <code>mini_openid</code>，<code>/mapi.php</code> 的 <code>pay_info</code> 可直接交给小程序 <code>wx.requestPayment</code>。</li>
+                <li><strong>APP：</strong><code>device=app</code>，<code>/mapi.php</code> 的 <code>pay_info</code> 返回微信 APP SDK 调起参数。</li>
+              </ul>
+            </div>
+          </details>
+          <details>
+            <summary>微信个人收款监听（SmsForwarder）</summary>
+            <div class="ui-doc-body">
+              <ol>
+                <li>先在通道管理找到“微信个人收款监听”的通道 ID，并在插件配置填写 SmsForwarder 密钥和收款二维码。</li>
+                <li>SmsForwarder 请求方式选 POST，Webhook 填写 <code id="docs-wechat-notify">/api/pay/{通道ID}/notify</code>，Secret 与插件配置保持一致；成功关键字仍可填写 <code>200</code>。</li>
+                <li>自定义模板填写 <code>{"title":"{{TITLE}}","msg":"{{MSG}}"}</code>；监听应用包名为 <code>com.tencent.mm</code>。</li>
+                <li>通知标题允许“微信支付”“微信收款助手”“微信收款商业版”。测试时先生成待支付订单，再按收银台显示金额准确付款。</li>
+                <li>直接打开通知地址会返回 <code>ready</code> 探活结果；实际投送会返回 <code>confirmed</code>、<code>duplicate</code> 或 <code>unmatched</code>，并明确说明是否确认订单。</li>
+                <li>仅当旧客户端严格要求正文为 <code>200/400</code> 时，在通知地址后追加 <code>?legacy=1</code>，成功关键字填写 <code>200</code>。</li>
+              </ol>
+              <button type="button" data-copy-doc="wechat-notify">复制通知地址模板</button>
+            </div>
+          </details>
+          <details>
+            <summary>支付宝官方支付产品</summary>
+            <div class="ui-doc-body">
+              <p><code>alipay_api</code> 对外仍使用 ePay V1。只勾选已经在支付宝开放平台签约并上线的产品。</p>
+              <ul>
+                <li><strong>电脑网站：</strong>PC 环境调用 <code>alipay.trade.page.pay</code>。</li>
+                <li><strong>手机网站：</strong>移动环境调用 <code>alipay.trade.wap.pay</code>。</li>
+                <li><strong>APP：</strong><code>/mapi.php</code> 的 <code>pay_info</code> 返回原生支付宝 SDK 使用的 order string。</li>
+                <li><strong>小程序 JSAPI：</strong>需传 <code>buyer_open_id</code> 或 <code>buyer_id</code>；返回的 <code>pay_info.tradeNO</code> 交给 <code>my.tradePay</code>。</li>
+                <li><strong>订单码：</strong>调用 <code>alipay.trade.precreate</code> 并展示支付宝二维码。</li>
+                <li><strong>当面付：</strong>需传当前有效的 <code>auth_code</code>；提交后会真实发起扣款。</li>
+              </ul>
+              <p>后台“通道管理 → 测试”可明确选择产品。自动模式只有在支付宝返回未签约或权限不足时才尝试后备产品，不会吞掉金额、签名或身份错误。</p>
+            </div>
+          </details>
+          <details open>
+            <summary>监听方式：哪些在 Worker，哪些需要 Docker</summary>
+            <div class="ui-doc-body">
+              <p><strong>统一优先级：</strong>Docker Watcher 在线且声明支持对应插件时，由 Docker 查询；容器离线超过两分钟后，具备 Worker 查询能力的插件自动接管。</p>
+              <p><strong>Worker 后备：</strong>付呗、收钱吧、支付宝账单、海科码钱、天阙 Pretran、旺铺管家、USDT，以及已填写 Token/Cookie 的拉卡拉直连、星驿付直连和小Y经营。</p>
+              <p><strong>只由 Docker 查询：</strong>富友、拉卡拉普通版、星驿付普通版、天阙会生活、易宝老板管账、易生收款啦和盛付通。盛付通使用官方页面的动态 SM2/SM4/SM3 加密请求，不在 Worker 中复刻。</p>
+              <p>外部排查时可访问 <code id="docs-receipt-poll">正在读取触发地址…</code> 手动跑一轮。返回值会列出待监听订单、发现流水、确认成功和错误明细；正常使用不要求另配这个计划任务。</p>
+              <button type="button" data-copy-doc="receipt-poll">复制手动排查地址</button>
+            </div>
+          </details>
+          <details>
+            <summary>Worker 主动查询：更快确认到账</summary>
+            <div class="ui-doc-body">
+              <p>收款确认有三种触发方式：① 收银台打开期间会按插件即时查询；② 部署向导里勾选了“启用每分钟后台轮询（Cron）”时，Worker 每分钟自动跑一轮；③ 用外部计划任务按固定间隔主动访问下面的触发地址（例如每 7 秒一次），Worker 收到后立即跑一轮。想比每分钟更快确认，或部署时没启用 Cron，就用第三种。</p>
+              <p><code id="docs-receipt-poll-active">正在读取触发地址…</code></p>
+              <ul>
+                <li>URL 已自带 <code>POLL_TRIGGER_TOKEN</code>，直接填进任意 HTTP 计划任务（如青龙、cron、Uptime 监控、云函数定时器）即可，不需要请求头、请求体或 Node。</li>
+                <li>没有待支付订单时，这个接口不会请求任何收款平台或 TronGrid，空跑几乎没有成本；间隔越短确认越快，按需要设置即可。</li>
+                <li>部署向导没勾选 Cron、也不主动访问时，只有收银台打开期间才会查询；纯监听类插件建议至少启用其一。</li>
+                <li>该地址属于敏感凭据，不要放进公开日志或前端页面；泄露后到上方“密钥管理”轮换轮询 Token 即可。</li>
+              </ul>
+              <button type="button" data-copy-doc="receipt-poll">复制主动查询地址</button>
+            </div>
+          </details>
+          <details open>
+            <summary>商业版插件：配置顺序</summary>
+            <div class="ui-doc-body">
+              <ol>
+                <li>先到 License 站确认域名已经购买对应插件。增购沿用原 License，不需要重新部署 License。</li>
+                <li>在“插件配置”找到插件，填好账号、密钥或收款地址，保存后再打开启用开关。</li>
+                <li>到“通道管理”新增通道。一个通道只选一种支付方式；同一插件要同时收微信和支付宝时，建两个通道。</li>
+                <li>标注为 Docker Watcher 的插件要保持容器在线。容器里的 <code>WORKER_URL</code>、<code>EDGEPAY_LICENSE</code> 和 <code>TRANSPORT_KEY</code> 必须与当前 Worker 对应。</li>
+                <li>从通道右侧点“测试”，先用小额订单确认收银台、流水匹配和商户回调都正常，再接生产订单。</li>
+              </ol>
+              <p>平台密码、API 密钥、Cookie 和 Access Token 保存后只显示掩码。密码框留空会保留原值。二维码建议上传实际收款码，不要上传平台首页或登录码。</p>
+            </div>
+          </details>
+          <!-- 付费插件的运营文档随插件下发，这里按当前实际装载的插件动态渲染。 -->
+          <div id="plugin-docs-dynamic"></div>
+          <details data-plugin-doc="shouqianba_receipt">
+            <summary>收钱吧码牌收款（shouqianba_receipt）</summary>
+            <div class="ui-doc-body">
+              <p>运行位置：Worker。实现沿用 MPay 一代的商户平台登录、Token 刷新和成功流水查询流程，不需要挂机容器。</p>
+              <ol>
+                <li>填写收钱吧商户平台账号和原始密码。系统登录时会按平台接口要求计算摘要，配置里不要填写摘要后的值。</li>
+                <li>上传实际码牌二维码，保存并启用插件。一个码牌同时收微信和支付宝时，分别新建两个通道。</li>
+                <li>生成小额测试订单并完成付款。Worker 会查询近几分钟内状态为成功的交易，并按金额、支付方式和订单时间匹配。</li>
+                <li>提示登录失效时，先在收钱吧商户平台确认账号没有设备验证或密码变更，再重新保存配置。</li>
+              </ol>
+              <p>收钱吧流水中的银行卡或银联交易不会映射成本站银行卡通道；银行卡通道只用于 Stripe 和 PayPal。</p>
+            </div>
+          </details>
+          <details>
+            <summary>客服页</summary>
+            <div class="ui-doc-body">
+              <p>在“收银台设置”上传客服头像与二维码并启用后，公开地址为 <code id="docs-contact-url">/contact</code>。页面会自动跟随系统的浅色或深色模式，不提供跳转按钮。</p>
+              <button type="button" data-copy-contact-url>复制客服页地址</button>
+            </div>
+          </details>
+          <details>
+            <summary>监听排查</summary>
+            <div class="ui-doc-body">
+              <p>如果没有确认订单，依次检查：订单是否仍在该通道设置的有效期内、付款金额是否完全一致、通道 ID 是否正确、签名密钥是否一致、Watcher 时间是否准确、通知响应是否为成功关键字。</p>
+            </div>
+          </details>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="order-detail-dialog" class="ui-order-dialog" aria-labelledby="order-detail-title">
+      <header>
+        <div><p class="ui-kicker">ORDER DETAIL</p><h2 id="order-detail-title">订单详情</h2></div>
+        <button type="button" data-close-order-detail>关闭</button>
+      </header>
+      <div id="order-detail-body" class="ui-order-detail"><p class="ui-dialog-loading">正在读取订单…</p></div>
+    </dialog>
+
+    <dialog id="order-action-dialog" class="ui-order-dialog ui-order-action-dialog" aria-labelledby="order-action-title">
+      <header>
+        <div><p class="ui-kicker">ORDER ACTION</p><h2 id="order-action-title">确认订单操作</h2></div>
+        <button type="button" data-close-order-action>取消</button>
+      </header>
+      <form id="order-action-form">
+        <p id="order-action-summary" class="ui-action-summary"></p>
+        <label id="order-action-amount-field" class="ui-dialog-field" hidden>
+          <span>退款金额（元）</span>
+          <input id="order-action-money" name="money" inputmode="decimal" autocomplete="off" placeholder="0.00" />
+          <small id="order-action-remaining"></small>
+        </label>
+        <label id="order-action-reason-field" class="ui-dialog-field" hidden>
+          <span>操作原因</span>
+          <textarea id="order-action-reason" name="reason" rows="3" maxlength="300" placeholder="请填写原因，操作会写入审计记录"></textarea>
+        </label>
+        <div class="ui-dialog-actions">
+          <button type="button" data-close-order-action>返回</button>
+          <button id="order-action-submit" type="submit">确认操作</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="channel-create-dialog" class="ui-order-dialog ui-channel-create-dialog" aria-labelledby="channel-create-title">
+      <header>
+        <div><p class="ui-kicker">NEW CHANNEL</p><h2 id="channel-create-title">新增支付通道</h2></div>
+        <button type="button" data-close-channel-create>取消</button>
+      </header>
+      <form id="channel-create-form">
+        <div class="ui-channel-create-grid">
+          <label class="ui-dialog-field">
+            <span>支付插件</span>
+            <select id="channel-create-plugin" name="plugin_code" required></select>
+          </label>
+          <label class="ui-dialog-field">
+            <span>支付方式</span>
+            <select id="channel-create-pay-type" name="pay_type" required></select>
+            <small>仅显示所选插件实际支持的支付方式。</small>
+          </label>
+          <label class="ui-dialog-field ui-channel-create-wide">
+            <span>通道名称</span>
+            <input id="channel-create-name" name="name" maxlength="80" required placeholder="例如：付呗银行卡" />
+          </label>
+          <label class="ui-dialog-field">
+            <span>权重</span>
+            <input name="weight" type="number" min="0" max="100000" step="1" value="100" required />
+          </label>
+          <label class="ui-dialog-field">
+            <span>订单有效期（分钟）</span>
+            <input name="order_expire_minutes" type="number" min="1" max="1440" step="1" placeholder="留空继承全局" />
+          </label>
+          <label class="ui-channel-create-enabled">
+            <input name="enabled" type="checkbox" checked />
+            <span>新增后立即启用</span>
+          </label>
+        </div>
+        <div class="ui-dialog-actions">
+          <button type="button" data-close-channel-create>返回</button>
+          <button id="channel-create-submit" type="submit">新增通道</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="channel-test-dialog" class="ui-order-dialog ui-channel-test-dialog" aria-labelledby="channel-test-title">
+      <header>
+        <div><p class="ui-kicker">CHANNEL TEST</p><h2 id="channel-test-title">测试支付通道</h2></div>
+        <button type="button" data-close-channel-test>关闭</button>
+      </header>
+      <div class="ui-channel-test-body">
+        <p class="ui-action-summary"><strong>这会创建真实待支付单。</strong>系统直接使用当前通道，不参与权重路由，也不会自动改成成功；支付和回调测试由你在新页面中完成。</p>
+        <form id="channel-test-form">
+          <input id="channel-test-id" type="hidden" />
+          <div class="ui-channel-test-grid">
+            <label class="ui-dialog-field">
+              <span>测试金额（元）</span>
+              <input id="channel-test-money" name="money" type="number" min="0.01" step="0.01" value="1.00" inputmode="decimal" required />
+            </label>
+            <label class="ui-dialog-field">
+              <span>商品名称</span>
+              <input id="channel-test-name" name="name" maxlength="128" value="支付测试" required />
+            </label>
+            <label class="ui-dialog-field">
+              <span>支付方式</span>
+              <select id="channel-test-pay-type" name="pay_type" required></select>
+            </label>
+            <label class="ui-dialog-field">
+              <span>支付环境</span>
+              <select id="channel-test-device" name="device">
+                <option value="auto">自动识别</option>
+                <option value="pc">电脑</option>
+                <option value="mobile">手机浏览器</option>
+                <option value="wechat">微信内</option>
+                <option value="alipay">支付宝内</option>
+                <option value="qq">QQ 内</option>
+              </select>
+            </label>
+            <label id="channel-test-wechat-product-field" class="ui-dialog-field" hidden>
+              <span>微信支付产品</span>
+              <select id="channel-test-wechat-product" name="wechat_product">
+                <option value="auto">按支付环境自动选择</option>
+                <option value="scan">Native 支付</option>
+                <option value="mp">JSAPI 支付</option>
+                <option value="h5">H5 支付</option>
+                <option value="app">APP 支付</option>
+                <option value="mini">小程序支付</option>
+              </select>
+            </label>
+            <label id="channel-test-wechat-openid-field" class="ui-dialog-field ui-channel-test-wide" hidden>
+              <span>公众号 openid（JSAPI 可选）</span>
+              <input id="channel-test-wechat-openid" name="openid" maxlength="128" placeholder="留空时使用已配置的公众号 AppSecret 自动授权" />
+              <small>该 openid 必须属于本通道配置的公众号 AppID。</small>
+            </label>
+            <label id="channel-test-wechat-mini-openid-field" class="ui-dialog-field ui-channel-test-wide" hidden>
+              <span>小程序 openid</span>
+              <input id="channel-test-wechat-mini-openid" name="mini_openid" maxlength="128" placeholder="小程序测试必须填写对应 AppID 下的 openid" />
+            </label>
+            <label id="channel-test-alipay-product-field" class="ui-dialog-field" hidden>
+              <span>支付宝支付产品</span>
+              <select id="channel-test-alipay-product" name="alipay_product">
+                <option value="auto">按支付环境自动选择</option>
+                <option value="scan">订单码支付</option>
+                <option value="pos">当面付（付款码）</option>
+                <option value="mini">小程序 JSAPI 支付</option>
+                <option value="app">APP 支付</option>
+                <option value="h5">手机网站支付</option>
+                <option value="web">电脑网站支付</option>
+              </select>
+            </label>
+            <label id="channel-test-alipay-auth-code-field" class="ui-dialog-field ui-channel-test-wide" hidden>
+              <span>支付宝付款码 auth_code</span>
+              <input id="channel-test-alipay-auth-code" name="auth_code" maxlength="128" autocomplete="off" placeholder="当面付测试必须填写当前用户付款码" />
+              <small>付款码有效期很短，提交会向支付宝真实发起扣款。</small>
+            </label>
+            <label id="channel-test-alipay-mini-app-id-field" class="ui-dialog-field ui-channel-test-wide" hidden>
+              <span>支付宝小程序 AppID</span>
+              <input id="channel-test-alipay-mini-app-id" name="sub_appid" maxlength="128" placeholder="留空时使用插件配置中的小程序 AppID" />
+            </label>
+            <label id="channel-test-alipay-buyer-open-id-field" class="ui-dialog-field" hidden>
+              <span>buyer_open_id</span>
+              <input id="channel-test-alipay-buyer-open-id" name="buyer_open_id" maxlength="128" placeholder="优先使用" />
+            </label>
+            <label id="channel-test-alipay-buyer-id-field" class="ui-dialog-field" hidden>
+              <span>buyer_id</span>
+              <input id="channel-test-alipay-buyer-id" name="buyer_id" maxlength="128" placeholder="未填写 buyer_open_id 时使用" />
+            </label>
+            <label class="ui-dialog-field ui-channel-test-wide">
+              <span>异步通知地址（可选）</span>
+              <input id="channel-test-notify-url" name="notify_url" type="url" maxlength="255" placeholder="https://你的测试站点/notify" />
+              <small>留空则不通知；填写后仅接受公网 HTTPS，成功订单按 ePay V1 签名并校验响应 success。</small>
+            </label>
+            <label class="ui-dialog-field ui-channel-test-wide">
+              <span>同步返回地址（可选）</span>
+              <input id="channel-test-return-url" name="return_url" type="url" maxlength="255" placeholder="https://你的测试站点/return" />
+            </label>
+          </div>
+          <div id="channel-test-result" class="ui-channel-test-result" hidden></div>
+          <div class="ui-dialog-actions">
+            <button type="button" data-close-channel-test>取消</button>
+            <button id="channel-test-submit" type="submit">生成测试订单</button>
+          </div>
+        </form>
+        <section class="ui-channel-test-history" aria-labelledby="channel-test-history-title">
+          <div><h3 id="channel-test-history-title">当前通道最近测试记录</h3><button id="channel-test-history-refresh" type="button">刷新</button></div>
+          <div class="ui-channel-test-table-wrap">
+            <table>
+              <thead><tr><th>测试订单</th><th>金额</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+              <tbody id="channel-test-records"><tr><td colspan="5" class="ui-empty">尚未读取测试记录</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog id="key-result-dialog" class="ui-order-dialog ui-key-dialog" aria-labelledby="key-result-title">
+      <header>
+        <div><h2 id="key-result-title">新密钥</h2></div>
+      </header>
+      <div class="ui-key-dialog-body">
+        <p id="key-result-note" class="ui-action-summary"></p>
+        <label class="ui-dialog-field">
+          <span>请立即复制，新密钥关闭后不再显示</span>
+          <textarea id="key-result-value" rows="3" readonly></textarea>
+        </label>
+        <div class="ui-dialog-actions">
+          <button type="button" data-copy-key-result>复制密钥</button>
+          <button type="button" data-confirm-key-saved>我已保存</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="version-update-dialog" class="ui-order-dialog ui-update-dialog" aria-labelledby="version-update-title">
+      <header>
+        <div><p class="ui-kicker">VERSION UPDATE</p><h2 id="version-update-title">发现新版本</h2></div>
+      </header>
+      <div class="ui-update-dialog-body">
+        <p id="version-update-message" class="ui-action-summary"></p>
+        <p>升级会跳转到 EdgePay 部署向导。填写原 Worker 名称后选择无损升级，原 D1、插件配置、支付通道、环境变量、Secrets、定时任务和路由都会保留。</p>
+        <div class="ui-dialog-actions">
+          <button type="button" data-close-version-update>暂不升级</button>
+          <button id="version-update-confirm" type="button">前往升级</button>
+        </div>
+      </div>
+    </dialog>
+
+    <div id="admin-notice" class="ui-admin-notice" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

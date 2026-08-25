@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#19191a" media="(prefers-color-scheme: dark)" />
+    <title>联系客服</title>
+    <link rel="stylesheet" href="/contact/contact.css?v=20260727-1" />
+    <script type="module" src="/contact/contact.js?v=20260727-1"></script>
+  </head>
+  <body>
+    <main class="contact-shell" aria-live="polite">
+      <section id="contact-content" class="contact-content" hidden>
+        <img
+          id="contact-avatar"
+          class="contact-avatar"
+          src="/contact/default-avatar.png"
+          width="54"
+          height="54"
+          alt=""
+          referrerpolicy="no-referrer"
+        />
+        <p class="contact-title">
+          <span aria-hidden="true">“</span>
+          <strong id="contact-title">添加我的企业微信与我联系吧</strong>
+          <span aria-hidden="true">”</span>
+        </p>
+        <section class="contact-qr-card" aria-labelledby="contact-qr-label">
+          <h1 id="contact-qr-label">手机微信扫码添加好友</h1>
+          <div class="contact-qr-frame">
+            <img
+              id="contact-qrcode"
+              width="200"
+              height="200"
+              alt="客服二维码"
+              referrerpolicy="no-referrer"
+            />
+          </div>
+        </section>
+      </section>
+
+      <section id="contact-unavailable" class="contact-unavailable" hidden>
+        <img src="/contact/default-avatar.png" width="54" height="54" alt="" />
+        <h1>客服页面暂未开放</h1>
+        <p>请稍后再试，或返回商户页面选择其他联系方式。</p>
+      </section>
+    </main>
+  </body>
+</html>

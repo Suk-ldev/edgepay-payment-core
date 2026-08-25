@@ -1,0 +1,18 @@
+services:
+  payment-watcher:
+    image: ghcr.io/suk-ldev/edgepay-watcher:latest
+    container_name: payment-watcher
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/var/storage
+    shm_size: 256mb
+    mem_limit: 768m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

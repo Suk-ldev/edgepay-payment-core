@@ -1,0 +1,12 @@
+# 仅用于 wrangler dev；生产环境请用 `wrangler secret put`，不要提交真实值。
+ADMIN_TOKEN=replace-with-a-long-admin-token
+# 独立于登录密码；一旦本地 D1 保存过插件配置，请勿更换。
+CONFIG_ENCRYPTION_KEY=replace-with-a-stable-random-encryption-key
+ADMIN_USERNAME=admin
+EPAY_KEY=replace-with-your-epay-v1-key
+WATCHER_TRANSPORT_SECRET=replace-with-a-dedicated-watcher-transport-key
+EDGEPAY_LICENSE=
+# 单行 JSON；字段名沿用原项目插件配置。生产环境请使用 PLUGIN_CONFIG_JSON Secret。
+PLUGIN_CONFIG_JSON={"fubei_receipt":{"channel_id":7,"watcher_username":"replace","watcher_password":"replace","receipt_terminal_no":"replace","receipt_match_mode":"amount","receipt_valid_seconds":300,"amount_offset_max":99,"receipt_qrcode_image":"/fubei.jpg","receipt_watcher_query_interval_seconds":5}}
+CHANNELS_JSON=[{"id":7,"name":"付呗码牌收款","plugin_code":"fubei_receipt","pay_types":["fubei","alipay","wxpay"],"weight":100,"enabled":true}]
+PUBLIC_BASE_URL=http://localhost:8787

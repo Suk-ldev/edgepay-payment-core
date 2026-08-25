@@ -1,0 +1,20 @@
+.dev.vars
+.wrangler/
+node_modules/
+coverage/
+*.local
+agent/serverless-watcher/.env
+agent/serverless-watcher/storage/
+agent/serverless-watcher/logs/
+dist/
+
+# wrangler.toml 是公开模板（占位 database_id，不含 mTLS 绑定），特意保留跟踪，
+# 以便 "Deploy to Cloudflare" 按钮读取。部署后若手动改成真实 database_id，
+# 注意别把改动误提交回这个模板仓库。
+
+# 证书私钥、系统与编辑器杂项文件
+*.pem
+*.key
+.DS_Store
+Thumbs.db
+*.log

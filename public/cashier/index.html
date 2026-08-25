@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f7fb" />
+    <title>EdgePay 收银台</title>
+    <script type="module" crossorigin src="/cashier/assets/cashier.js?v=20260727-2"></script>
+    <script type="module" src="/cashier/custom.js?v=20260727-2"></script>
+    <link rel="stylesheet" crossorigin href="/cashier/assets/cashier.css" />
+    <style>
+      .brand-logo { display: none !important; }
+      .brand-block::before {
+        color: #0f172a;
+        content: "EdgePay";
+        font-size: 17px;
+        font-weight: 800;
+        letter-spacing: -.02em;
+      }
+      .cashier-custom-footer {
+        width: min(900px, 100%);
+        margin: 28px auto 0;
+        color: #60708a;
+        text-align: center;
+        font-size: 14px;
+        line-height: 1.7;
+      }
+      .cashier-custom-footer > * + * { margin-top: 10px; }
+      .cashier-custom-footer-button {
+        min-height: 42px;
+        border: 1px solid #cddced;
+        border-radius: 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 18px;
+        color: #0756b8;
+        background: #fff;
+        font-weight: 700;
+        text-decoration: none;
+      }
+      .cashier-custom-footer-button:hover { border-color: #0756b8; background: #eef6ff; }
+      .cashier-custom-footer img { max-width: min(100%, 420px); margin: 0 auto; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

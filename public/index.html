@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101113" />
+    <meta name="description" content="EdgePay 是一个单租户、轻量的支付中台。" />
+    <title>EdgePay · 轻量支付中台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="home-shell">
+    <header class="home-nav">
+      <a class="home-brand" href="/" aria-label="EdgePay 首页"><span class="brand-mark">E</span><span>EdgePay<br /><small>SERVERLESS / SINGLE</small></span></a>
+      <nav aria-label="主导航"><a href="#methods">支付方式</a><a href="#flow">处理流程</a><a href="#start">开始使用</a></nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow reveal">EDGEPAY / PAYMENT INFRASTRUCTURE</p>
+          <h1 class="reveal delay-1">收款，<br />保持轻量。</h1>
+          <p class="hero-text reveal delay-2">面向单一业务的 ePay V1 支付中台。保留原协议、原插件字段和签名回调；订单与重试只保留必要状态。</p>
+          <div class="hero-actions reveal delay-3"><a class="quiet-action" href="#start">查看接入方式 ↓</a></div>
+        </div>
+        <div class="signal-stage" aria-label="支付信号处理示意图">
+          <div class="stage-label top">INCOMING SIGNALS</div>
+          <div class="stage-label bottom">VERIFIED / SETTLED</div>
+          <svg viewBox="0 0 600 560" role="img" aria-label="支付信号被验证并写入订单状态的流程图">
+            <defs><linearGradient id="trace" x1="0" x2="1"><stop stop-color="#6f9cff" stop-opacity=".1"/><stop offset=".5" stop-color="#6f9cff"/><stop offset="1" stop-color="#6f9cff" stop-opacity=".1"/></linearGradient></defs>
+            <path class="trace trace-one" d="M35 125 H212 C250 125 250 270 300 270 H565" />
+            <path class="trace trace-two" d="M35 265 H183 C236 265 236 270 300 270 H565" />
+            <path class="trace trace-three" d="M35 410 H212 C250 410 250 270 300 270 H565" />
+            <circle class="signal source-a" cx="35" cy="125" r="8"/><circle class="signal source-b" cx="35" cy="265" r="8"/><circle class="signal source-c" cx="35" cy="410" r="8"/>
+            <circle class="signal hub" cx="300" cy="270" r="19"/><circle class="signal target" cx="565" cy="270" r="9"/>
+          </svg>
+          <div class="stage-chip chip-a">FUBEI / HTTPS</div><div class="stage-chip chip-b">STRIPE / WEBHOOK</div><div class="stage-chip chip-c">WECHAT / API</div><div class="stage-chip chip-core">D1<br /><small>ORDER STATE</small></div>
+        </div>
+      </section>
+
+      <section id="methods" class="method-strip">
+        <p class="eyebrow">PRESET PAYMENT METHODS</p>
+        <div class="method-list"><span>微信个人收款</span><span>PayPal</span><span>Stripe</span><span>支付宝</span><span>USDT TRC20</span><span>微信官方 API</span><span>付呗</span></div>
+      </section>
+
+      <section id="flow" class="home-section flow-section">
+        <div><p class="eyebrow">ONE CLEAR PATH</p><h2>每笔支付只有一条可审计的状态线。</h2></div>
+        <ol class="flow-list"><li><span>01</span><div><strong>标准 V1 下单</strong><p>业务系统调用 <code>submit.php</code> 或 <code>mapi.php</code>，按原 ePay MD5 规则签名。</p></div></li><li><span>02</span><div><strong>接收并验证通道信号</strong><p>通道仍走 <code>/api/pay/{channelId}/notify</code>；金额、订单、签名与有效期必须同时匹配。</p></div></li><li><span>03</span><div><strong>V1 回调与重试</strong><p>成功后用相同 MD5 key 向 <code>notify_url</code> 发 GET 通知；商户回 <code>success</code> 才完成。</p></div></li></ol>
+      </section>
+
+      <section id="start" class="home-section start-section">
+        <div><p class="eyebrow">START HERE</p><h2>把配置放在变量里，<br />而不是表里。</h2></div>
+        <div class="setup-list"><p><b>01</b><span>管理员手动访问 <code>/admin</code>，在后台维护插件凭据、通道权重和订单有效期。</span></p><p><b>02</b><span>运行时配置统一保存在 D1，敏感字段使用独立配置密钥加密，不保留重复环境变量。</span></p><p><b>03</b><span>商户只接 ePay V1：<code>POST /mapi.php</code> 或 <code>/submit.php</code>，无需更改原业务端接口逻辑。</span></p></div>
+      </section>
+    </main>
+    <footer><span>EDGEPAY / SINGLE-TENANT PAYMENT INFRASTRUCTURE</span></footer>
+  </body>
+</html>
