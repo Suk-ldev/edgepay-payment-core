@@ -100,14 +100,20 @@ function normalizeRows(rows, descriptor, config = {}) {
     normalized: 0,
   };
   const expectedMerchant = String(config.receipt_account_no ?? '').trim();
+  const expectedStore = String(config.receipt_store_id ?? '').trim();
   const expectedTerminal = String(config.receipt_terminal_no ?? '').trim();
+  const expectedPage = String(config.receipt_page_id ?? '').trim();
   for (const row of Array.isArray(rows) ? rows : []) {
     if (descriptor.isSuccessful && !descriptor.isSuccessful(row)) continue;
     stats.successful += 1;
     const merchant = String(valueAt(row, descriptor.merchant, '')).trim();
+    const store = String(valueAt(row, descriptor.store, '')).trim();
     const terminal = String(valueAt(row, descriptor.terminal, '')).trim();
+    const page = String(valueAt(row, descriptor.page, '')).trim();
     if (expectedMerchant && merchant && merchant !== expectedMerchant) continue;
+    if (expectedStore && store && store !== expectedStore) continue;
     if (expectedTerminal && terminal && terminal !== expectedTerminal) continue;
+    if (expectedPage && page && page !== expectedPage) continue;
     stats.scoped += 1;
     const orderNo = String(valueAt(row, descriptor.orderNo, '')).trim();
     const amountFen = descriptor.amountUnit === 'fen'
@@ -122,7 +128,12 @@ function normalizeRows(rows, descriptor, config = {}) {
       order_no: orderNo.slice(0, 64),
       pay_type: payType,
       price: (amountFen / 100).toFixed(2),
-      channel: terminal || merchant,
+      channel: terminal || page || store || merchant,
+      merchant_no: merchant,
+      store_id: store,
+      terminal_no: terminal,
+      page_id: page,
+      merchant_name: String(valueAt(row, descriptor.merchantName, '')).slice(0, 128),
       remark: String(valueAt(row, descriptor.remark, '')).slice(0, 255),
       paid_at: paidAt,
     });

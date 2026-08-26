@@ -19,8 +19,10 @@ const SHOUQIANBA_DESCRIPTOR = {
   amount: ['original_amount'],
   amountUnit: 'fen',
   paidAt: ['finish_time', 'pay_time', 'create_time', '_worker_paid_at'],
-  merchant: ['store_sn', 'merchant_sn'],
+  merchant: ['merchant_sn', 'merchant_no'],
+  store: ['store_sn', 'store_id'],
   terminal: ['terminal_sn'],
+  merchantName: ['store_name', 'merchant_name'],
   remark: ['order_sn', 'subject'],
   isSuccessful(row) {
     return ['2000', 'SUCCESS', 'PAID', '1'].includes(String(valueAt(row, ['status', 'trade_status'], '2000')).toUpperCase());

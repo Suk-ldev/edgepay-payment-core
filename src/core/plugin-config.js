@@ -4,6 +4,9 @@
  */
 
 import { pluginMissingFields } from '../plugin-api.js';
+import {
+  RECEIPT_DISCOVERY_WINDOW_SECONDS, receiptDiscoveryFields,
+} from '../receipt-discovery.js';
 
 /** 取出某个插件自己的那段配置。 */
 export function configForPlugin(config, pluginCode) {
@@ -54,12 +57,17 @@ export function adminPluginForms(registry, config) {
   return registry.manifests().map((manifest) => {
     const settings = configForPlugin(config, manifest.code);
     const missingFields = missingPluginFields(registry, config, manifest.code);
+    const discoveryFields = receiptDiscoveryFields(manifest);
     return {
       code: manifest.code,
       name: manifest.name,
       configured: missingFields.length === 0,
       enabled: pluginEnabled(registry, config, manifest.code),
       missingFields,
+      receiptDiscovery: discoveryFields.length ? {
+        fields: discoveryFields,
+        windowSeconds: RECEIPT_DISCOVERY_WINDOW_SECONDS,
+      } : null,
       fields: manifest.adminFields.map((field) => ({
         ...field,
         value: field.secret

@@ -78,6 +78,16 @@ html [hidden] { display:none !important; }
 .ui-option-row input,.ui-channel-toggle input,.ui-plugin-toggle input,.ui-channel-create-enabled input { width:15px; height:15px; accent-color:#176bd4; }
 .ui-config-actions { display:flex; align-items:center; justify-content:space-between; gap:20px; padding-top:17px; border-top:1px solid #e7eef7; }
 .ui-config-actions span { color:#8191a8; font-size:11px; }
+.ui-receipt-discovery { margin:0 0 20px; padding:18px; border:1px solid #bfd7f2; border-radius:6px; background:#f7fbff; }
+.ui-receipt-discovery-head { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; }
+.ui-receipt-discovery h4 { margin:0 0 6px; color:#123a68; font-size:14px; }
+.ui-receipt-discovery p { margin:0; color:#60708a; font-size:11px; line-height:1.7; }
+.ui-receipt-discovery-head button { flex:0 0 auto; min-height:36px; padding:0 14px; border:1px solid #176bd4; border-radius:5px; color:#fff; background:#176bd4; cursor:pointer; font-size:12px; font-weight:700; }
+.ui-receipt-discovery-status { margin-top:12px!important; padding-top:12px; border-top:1px solid #d9e8f7; }
+.ui-receipt-discovery .ui-table-wrap { margin-top:12px; background:#fff; }
+.ui-receipt-discovery .ui-table-wrap table { min-width:980px; }
+.ui-receipt-discovery .ui-table-wrap th,.ui-receipt-discovery .ui-table-wrap td { padding:10px; font-size:11px; }
+.ui-receipt-discovery code { color:#123a68; font:11px ui-monospace,Consolas,monospace; }
 .ui-heading-actions { display:flex; align-items:center; justify-content:flex-end; gap:16px; }
 .ui-heading-actions p { max-width:440px; margin:0; color:#60708a; text-align:right; font-size:12px; line-height:1.6; }
 .ui-heading-actions code { color:#0756b8; background:#eef6ff; }
@@ -305,6 +315,7 @@ html [hidden] { display:none !important; }
   .ui-config-grid { grid-template-columns:1fr; }
   .ui-config-wide { grid-column:auto; }
   .ui-config-actions,.ui-heading-actions { width:100%; align-items:flex-start; flex-direction:column; }
+  .ui-receipt-discovery-head { flex-direction:column; }
   .ui-heading-actions p { text-align:left; }
   .ui-heading-actions button,.ui-config-actions button { width:100%; }
   .ui-admin-notice { right:16px; bottom:16px; left:16px; }

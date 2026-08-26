@@ -11,6 +11,7 @@ const {
   channelExpireMinutes, parseChannels: coreParseChannels, resolveChannel: coreResolveChannel, weightedChannel,
 } = await import('../src/channels.js');
 const {
+  adminPluginForms: coreAdminPluginForms,
   pluginEnabled: corePluginEnabled, publicPluginList: corePublicPluginList,
 } = await import('../src/core/plugin-config.js');
 const { createPluginRegistry, freePlugins } = await import('../src/index.js');
@@ -24,6 +25,7 @@ const pluginByCode = (code) => registry.get(code)?.manifest ?? null;
 const pluginAdminFields = (code) => registry.get(code)?.manifest.adminFields ?? [];
 const pluginEnabled = (config, code) => corePluginEnabled(registry, config, code);
 const publicPluginList = (config) => corePublicPluginList(registry, config);
+const adminPluginForms = (config) => coreAdminPluginForms(registry, config);
 const parseChannels = (input) => coreParseChannels(registry, input);
 const resolveChannel = (channels, type) => coreResolveChannel(registry, channels, type);
 
@@ -142,6 +144,22 @@ test('监听插件不再提供重复的订单有效期配置', () => {
     pluginAdminFields('wechat_api')
       .filter((field) => ['cert_path', 'key_path'].includes(field.key)),
     [],
+  );
+});
+
+test('第三方收款插件表单声明可从最近流水回填的实际编号字段', () => {
+  const forms = adminPluginForms({});
+  const fubei = forms.find((form) => form.code === 'fubei_receipt');
+  const shouqianba = forms.find((form) => form.code === 'shouqianba_receipt');
+  assert.deepEqual(fubei.receiptDiscovery.fields.map((field) => field.key), [
+    'receipt_terminal_no', 'receipt_account_no',
+  ]);
+  assert.deepEqual(shouqianba.receiptDiscovery.fields.map((field) => field.key), [
+    'receipt_account_no', 'receipt_store_id', 'receipt_terminal_no', 'receipt_page_id',
+  ]);
+  assert.match(
+    shouqianba.fields.find((field) => field.key === 'receipt_terminal_no').help,
+    /最近流水/u,
   );
 });
 

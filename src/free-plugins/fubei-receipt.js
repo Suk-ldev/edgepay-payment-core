@@ -211,6 +211,10 @@ export function normalizeWorkerFubeiRecords(rows, terminalNo = '') {
       price: (amountFen / 100).toFixed(2),
       paid_at: paidAt,
       channel: deviceNo || String(row?.store_id ?? ''),
+      merchant_no: String(row?.store_id ?? ''),
+      store_id: String(row?.store_id ?? ''),
+      terminal_no: deviceNo,
+      merchant_name: String(row?.store_name ?? row?.merchant_name ?? ''),
       merchant_order_no: String(row?.merchant_order_sn ?? ''),
     });
     stats.normalized += 1;
@@ -304,7 +308,6 @@ class WorkerFubeiClient {
 export async function queryWorkerFubei(account, state = {}, fetchImpl = null) {
   const config = account.config ?? {};
   const terminal = String(config.receipt_terminal_no ?? '').trim();
-  if (!terminal) throw new Error('付呗收款终端号未配置');
   const client = new WorkerFubeiClient(config, state.cookies, fetchImpl);
   const { rows, window } = await client.query(account.orders);
   const { records, stats } = normalizeWorkerFubeiRecords(rows, terminal);
@@ -336,8 +339,16 @@ export const fubeiReceiptPlugin = definePlugin({
     adminFields: [
       { key: 'watcher_username', label: '平台登录账号', type: 'text' },
       { key: 'watcher_password', label: '平台登录密码', type: 'password', secret: true },
-      { key: 'receipt_terminal_no', label: '收款终端号', type: 'text' },
-      { key: 'receipt_account_no', label: '门店 ID / 收款账号标识', type: 'text', placeholder: '选填，单门店可留空' },
+      {
+        key: 'receipt_terminal_no', label: '收款终端号', type: 'text',
+        placeholder: '不知道可先留空，保存后查询最近流水',
+        help: '先让目标付呗码牌真实收一笔小额款，再从最近流水复制设备编号。',
+      },
+      {
+        key: 'receipt_account_no', label: '门店 ID / 收款账号标识', type: 'text',
+        placeholder: '选填，可从最近流水识别',
+        help: '单门店通常可留空；多门店时填写流水中的门店编号。',
+      },
       { key: 'merchant_name', label: '码牌商户名', type: 'text', placeholder: '选填，用于区分多码牌' },
       { key: 'receipt_match_mode', label: '识别模式', type: 'select', options: [['amount', '金额变动'], ['remark', '付款备注']] },
       { key: 'amount_offset_max', label: '金额偏移最大值（分）', type: 'number', min: 0, max: 99, placeholder: '默认 99，可留空' },

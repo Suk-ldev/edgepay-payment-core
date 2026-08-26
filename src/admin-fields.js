@@ -14,11 +14,27 @@ export const RECEIPT_QRCODE_FIELD = Object.freeze({
 export const WATCHER_BASE_FIELDS = Object.freeze([
   { key: 'watcher_username', label: '平台登录账号', type: 'text' },
   { key: 'watcher_password', label: '平台登录密码', type: 'password', secret: true },
-  { key: 'receipt_account_no', label: '商户号 / 收款账号标识', type: 'text', placeholder: '选填，多门店时用于区分' },
+  {
+    key: 'receipt_account_no', label: '商户号 / 收款账号标识', type: 'text',
+    placeholder: '不知道可先留空，保存后查询最近流水',
+    help: '用于限定商户范围；可从最近真实到账流水识别并回填。',
+  },
   { key: 'receipt_merchant_name', label: '商户名称', type: 'text', placeholder: '选填' },
-  { key: 'receipt_store_id', label: '门店 ID', type: 'text', placeholder: '选填，单门店可留空' },
-  { key: 'receipt_terminal_no', label: '收款终端号', type: 'text', placeholder: '选填，单终端可留空' },
-  { key: 'receipt_page_id', label: '流水页面 ID', type: 'text', placeholder: '选填，高级用法' },
+  {
+    key: 'receipt_store_id', label: '门店 ID', type: 'text',
+    placeholder: '不知道可先留空，保存后查询最近流水',
+    help: '多门店时用于筛选；请填写平台流水实际返回的门店编号。',
+  },
+  {
+    key: 'receipt_terminal_no', label: '收款终端号', type: 'text',
+    placeholder: '不知道可先留空，保存后查询最近流水',
+    help: '先让目标码牌真实收一笔小额款，再从最近流水复制终端号。',
+  },
+  {
+    key: 'receipt_page_id', label: '流水页面 / 码牌 ID', type: 'text',
+    placeholder: '一般留空；平台流水返回时可回填',
+    help: '仅部分平台区分码牌或流水页面；没有返回值就保持空白。',
+  },
   RECEIPT_QRCODE_FIELD,
   { key: 'receipt_watcher_page_size', label: '单次查询条数', type: 'number', min: 10, max: 500 },
 ]);

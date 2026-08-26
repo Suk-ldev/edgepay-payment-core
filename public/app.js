@@ -10,6 +10,10 @@ const ordersPageSize = document.querySelector('#orders-page-size');
 const pluginEditor = document.querySelector('#plugin-editor');
 const pluginFields = document.querySelector('#plugin-fields');
 const pluginForm = document.querySelector('#plugin-form');
+const pluginReceiptDiscovery = document.querySelector('#plugin-receipt-discovery');
+const pluginReceiptDiscoveryRun = document.querySelector('#plugin-receipt-discovery-run');
+const pluginReceiptDiscoveryStatus = document.querySelector('#plugin-receipt-discovery-status');
+const pluginReceiptDiscoveryTable = document.querySelector('#plugin-receipt-discovery-table');
 const pluginFilters = document.querySelector('#plugin-filters');
 const channelFilters = document.querySelector('#channel-filters');
 const notice = document.querySelector('#admin-notice');
@@ -49,6 +53,8 @@ const orderQuery = {
   callback_status: '',
 };
 let activePluginCode = '';
+let receiptDiscoveryRecords = [];
+let receiptDiscoverySequence = 0;
 let activeOrderAction = null;
 let activeTestChannel = null;
 let contactUrl = `${location.origin}/contact`;
@@ -170,12 +176,19 @@ function renderLicenseProblem(license) {
     host.innerHTML = '';
     return;
   }
+  const unavailable = license.errorCode === 'license_service_unavailable' || license.retryable;
+  const title = unavailable
+    ? '授权服务暂时不可达，当前没有可用的本地授权缓存'
+    : 'License 校验没有通过，付费插件暂时按未购买处理';
+  const action = unavailable
+    ? '这通常不是 License 或绑定域名填写错误，无需重新填写或重新部署。免费插件不受影响，请稍后刷新重试。'
+    : '免费插件不受影响。请核对 Worker 的 EDGEPAY_LICENSE、PUBLIC_BASE_URL 与 License 绑定域名。';
   host.hidden = false;
   host.innerHTML = `<div class="ui-alert ui-alert-error">
     <div>
-      <strong>License 校验没有通过，付费插件暂时按未购买处理</strong>
+      <strong>${text(title)}</strong>
       <p>${text(license.error)}</p>
-      <p>免费插件不受影响。确认 Worker 的 <code>EDGEPAY_LICENSE</code> 与授权域名一致后刷新重试。</p>
+      <p>${text(action)}</p>
     </div>
   </div>`;
 }
@@ -900,9 +913,10 @@ function imageUploadMarkup(field, inputId) {
 function fieldMarkup(field) {
   const inputId = `plugin-field-${field.key}`;
   const configuredNote = field.secret && field.configured ? '<small>已配置，留空保留原值</small>' : '';
+  const helpNote = field.help ? `<small>${text(field.help)}</small>` : '';
   if (field.type === 'image') return imageUploadMarkup(field, inputId);
   if (field.type === 'textarea') {
-    return `<label class="ui-config-field ui-config-wide" for="${inputId}"><span>${text(field.label)}</span><textarea id="${inputId}" name="${text(field.key)}" rows="4" ${field.secret ? 'autocomplete="new-password"' : ''} placeholder="${field.secret && field.configured ? '已配置，留空不修改' : text(field.placeholder ?? '')}">${field.secret ? '' : text(field.value)}</textarea>${configuredNote}</label>`;
+    return `<label class="ui-config-field ui-config-wide" for="${inputId}"><span>${text(field.label)}</span><textarea id="${inputId}" name="${text(field.key)}" rows="4" ${field.secret ? 'autocomplete="new-password"' : ''} placeholder="${field.secret && field.configured ? '已配置，留空不修改' : text(field.placeholder ?? '')}">${field.secret ? '' : text(field.value)}</textarea>${configuredNote}${helpNote}</label>`;
   }
   if (field.type === 'select') {
     return `<label class="ui-config-field" for="${inputId}"><span>${text(field.label)}</span><select id="${inputId}" name="${text(field.key)}">${optionMarkup(field, field.value)}</select></label>`;
@@ -913,7 +927,7 @@ function fieldMarkup(field) {
   }
   const type = field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text';
   const bounds = `${field.min !== undefined ? ` min="${text(field.min)}"` : ''}${field.max !== undefined ? ` max="${text(field.max)}"` : ''}`;
-  return `<label class="ui-config-field" for="${inputId}"><span>${text(field.label)}</span><input id="${inputId}" name="${text(field.key)}" type="${type}" value="${field.secret ? '' : text(field.value)}" placeholder="${field.secret && field.configured ? '已配置，留空不修改' : text(field.placeholder ?? '')}"${bounds} ${field.secret ? 'autocomplete="new-password"' : ''} />${configuredNote}</label>`;
+  return `<label class="ui-config-field" for="${inputId}"><span>${text(field.label)}</span><input id="${inputId}" name="${text(field.key)}" type="${type}" value="${field.secret ? '' : text(field.value)}" placeholder="${field.secret && field.configured ? '已配置，留空不修改' : text(field.placeholder ?? '')}"${bounds} ${field.secret ? 'autocomplete="new-password"' : ''} />${configuredNote}${helpNote}</label>`;
 }
 
 function loadImage(file) {
@@ -998,12 +1012,130 @@ async function handleImageFile(input) {
   }
 }
 
+function receiptPayTypeName(value) {
+  return { wxpay: '微信', alipay: '支付宝' }[value] ?? value ?? '—';
+}
+
+function receiptPaidAt(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? dateTime(new Date(seconds * 1_000).toISOString()) : '—';
+}
+
+function resetReceiptDiscovery(form) {
+  receiptDiscoverySequence += 1;
+  receiptDiscoveryRecords = [];
+  const available = Boolean(form?.receiptDiscovery);
+  pluginReceiptDiscovery.hidden = !available;
+  pluginReceiptDiscoveryTable.hidden = true;
+  pluginReceiptDiscoveryTable.querySelector('tbody').innerHTML = '';
+  pluginReceiptDiscoveryRun.disabled = false;
+  pluginReceiptDiscoveryRun.textContent = '查询最近流水';
+  pluginReceiptDiscoveryStatus.textContent = available
+    ? '先保存平台登录凭据，再让目标码牌完成一笔真实小额收款。查询会忽略当前填写的筛选编号，避免错误编号把流水过滤掉。'
+    : '';
+}
+
+function renderReceiptDiscoveryRecords(payload) {
+  receiptDiscoveryRecords = Array.isArray(payload.records) ? payload.records : [];
+  const body = pluginReceiptDiscoveryTable.querySelector('tbody');
+  if (!receiptDiscoveryRecords.length) {
+    pluginReceiptDiscoveryTable.hidden = true;
+    pluginReceiptDiscoveryStatus.textContent = '近 5 分钟没有识别到成功流水。请先用目标码牌真实收一笔小额款，等待平台显示成功后再查询。';
+    return;
+  }
+  body.innerHTML = receiptDiscoveryRecords.map((record, index) => {
+    const ids = record.identifiers ?? {};
+    return `<tr>
+      <td>${text(receiptPaidAt(record.paid_at))}</td>
+      <td><code>${text(record.order_no || '—')}</code></td>
+      <td><strong>¥${text(record.price)}</strong><small>${text(receiptPayTypeName(record.pay_type))}</small></td>
+      <td><code>${text(ids.receipt_account_no || '—')}</code><small>${text(record.merchant_name || '—')}</small></td>
+      <td><code>${text(ids.receipt_store_id || '—')}</code></td>
+      <td><code>${text(ids.receipt_terminal_no || '—')}</code></td>
+      <td><code>${text(ids.receipt_page_id || '—')}</code></td>
+      <td><button class="ui-row-action" type="button" data-fill-receipt-record="${index}">填入编号</button></td>
+    </tr>`;
+  }).join('');
+  pluginReceiptDiscoveryTable.hidden = false;
+  const executor = payload.execution === 'docker' ? 'Docker Watcher' : 'Worker';
+  pluginReceiptDiscoveryStatus.textContent = `由 ${executor} 查到 ${receiptDiscoveryRecords.length} 条最近成功流水。请按目标码牌对应的那一行回填，不要只凭金额猜测。`;
+}
+
+async function pollReceiptDiscovery(pluginCode, requestId, sequence) {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline && activePluginCode === pluginCode && receiptDiscoverySequence === sequence) {
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const payload = await request(`/admin/api/plugins/${encodeURIComponent(pluginCode)}/recent-receipts?request_id=${encodeURIComponent(requestId)}`);
+    if (['pending', 'running'].includes(payload.status)) {
+      pluginReceiptDiscoveryStatus.textContent = payload.status === 'running'
+        ? 'Docker Watcher 正在登录平台并读取最近流水，请稍候…'
+        : '查询任务已发送，正在等待 Docker Watcher 接收…';
+      continue;
+    }
+    if (payload.status !== 'complete') throw new Error(payload.error || '最近流水查询失败');
+    return payload;
+  }
+  throw new Error('最近流水查询超时，请确认 Docker Watcher 在线后重试');
+}
+
+async function queryRecentReceipts() {
+  const pluginCode = activePluginCode;
+  const sequence = ++receiptDiscoverySequence;
+  pluginReceiptDiscoveryRun.disabled = true;
+  pluginReceiptDiscoveryRun.textContent = '正在查询…';
+  pluginReceiptDiscoveryTable.hidden = true;
+  pluginReceiptDiscoveryStatus.textContent = '正在读取已保存的登录凭据并查询平台最近成功流水…';
+  try {
+    let payload = await request(`/admin/api/plugins/${encodeURIComponent(pluginCode)}/recent-receipts`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (['pending', 'running'].includes(payload.status)) {
+      payload = await pollReceiptDiscovery(pluginCode, payload.request_id, sequence);
+    }
+    if (activePluginCode === pluginCode && receiptDiscoverySequence === sequence) {
+      renderReceiptDiscoveryRecords(payload);
+    }
+  } catch (error) {
+    if (activePluginCode === pluginCode && receiptDiscoverySequence === sequence) {
+      pluginReceiptDiscoveryStatus.textContent = error.message;
+      showNotice(error.message, 'error');
+    }
+  } finally {
+    if (activePluginCode === pluginCode && receiptDiscoverySequence === sequence) {
+      pluginReceiptDiscoveryRun.disabled = false;
+      pluginReceiptDiscoveryRun.textContent = '查询最近流水';
+    }
+  }
+}
+
+function fillReceiptIdentifiers(index) {
+  const form = pluginForms.find((candidate) => candidate.code === activePluginCode);
+  const record = receiptDiscoveryRecords[index];
+  if (!form?.receiptDiscovery || !record) return;
+  let changed = 0;
+  for (const field of form.receiptDiscovery.fields) {
+    const value = String(record.identifiers?.[field.key] ?? '').trim();
+    const input = pluginForm.elements.namedItem(field.key);
+    if (!value || !input || input instanceof RadioNodeList) continue;
+    input.value = value;
+    changed += 1;
+  }
+  if (!changed) {
+    showNotice('这一行没有当前插件可回填的编号', 'error');
+    return;
+  }
+  showNotice(`已填入 ${changed} 个编号，请核对后保存插件配置`);
+  pluginReceiptDiscoveryStatus.textContent = '编号已填入上方表单；请核对目标码牌、商户和门店无误后点击“保存插件配置”。';
+}
+
 function openPluginEditor(pluginCode) {
   const form = pluginForms.find((candidate) => candidate.code === pluginCode);
   if (!form) return;
   activePluginCode = pluginCode;
   document.querySelector('#plugin-editor-title').textContent = `编辑 ${form.name}`;
   pluginFields.innerHTML = form.fields.map(fieldMarkup).join('');
+  resetReceiptDiscovery(form);
   pluginEditor.hidden = false;
   pluginEditor.classList.remove('entering');
   requestAnimationFrame(() => pluginEditor.classList.add('entering'));
@@ -1011,6 +1143,7 @@ function openPluginEditor(pluginCode) {
 }
 
 function closePluginEditor() {
+  receiptDiscoverySequence += 1;
   pluginEditor.hidden = true;
   activePluginCode = '';
 }
@@ -1422,6 +1555,11 @@ document.querySelector('#channel-test-history-refresh').addEventListener('click'
   if (activeTestChannel) loadChannelTestRecords(activeTestChannel.id);
 });
 document.querySelector('#plugin-editor-close').addEventListener('click', closePluginEditor);
+pluginReceiptDiscoveryRun.addEventListener('click', queryRecentReceipts);
+pluginReceiptDiscoveryTable.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-fill-receipt-record]');
+  if (button) fillReceiptIdentifiers(Number(button.dataset.fillReceiptRecord));
+});
 document.querySelector('#save-channels').addEventListener('click', saveChannels);
 document.querySelector('#refresh').addEventListener('click', async () => {
   try {

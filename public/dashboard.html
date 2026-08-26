@@ -128,7 +128,20 @@
         <div class="ui-table-wrap"><table><thead><tr><th>插件</th><th>支付方式</th><th>类型</th><th>状态</th><th>说明</th><th>操作</th></tr></thead><tbody id="plugins-body"><tr><td class="ui-empty" colspan="6">正在读取插件配置…</td></tr></tbody></table></div>
         <section id="plugin-editor" class="ui-config-editor" hidden aria-labelledby="plugin-editor-title">
           <header><div><h3 id="plugin-editor-title">编辑插件</h3></div><button id="plugin-editor-close" type="button">收起</button></header>
-          <form id="plugin-form"><div id="plugin-fields" class="ui-config-grid"></div><div class="ui-config-actions"><span id="plugin-save-note">密码字段留空即保留原值</span><button type="submit">保存插件配置</button></div></form>
+          <form id="plugin-form">
+            <div id="plugin-fields" class="ui-config-grid"></div>
+            <section id="plugin-receipt-discovery" class="ui-receipt-discovery" hidden>
+              <div class="ui-receipt-discovery-head">
+                <div><h4>不知道商户号、门店号或终端号？</h4><p>先保存平台登录凭据，再让目标码牌完成一笔真实小额收款；系统会查询最近 5 分钟成功流水，不会确认或修改订单。</p></div>
+                <button id="plugin-receipt-discovery-run" type="button">查询最近流水</button>
+              </div>
+              <p id="plugin-receipt-discovery-status" class="ui-receipt-discovery-status">流水结果只展示用于配置的编号、金额和时间，不展示付款人信息。</p>
+              <div id="plugin-receipt-discovery-table" class="ui-table-wrap" hidden>
+                <table><thead><tr><th>支付时间</th><th>平台流水</th><th>金额 / 方式</th><th>商户号 / 名称</th><th>门店号</th><th>终端号</th><th>码牌 / 页面 ID</th><th>操作</th></tr></thead><tbody></tbody></table>
+              </div>
+            </section>
+            <div class="ui-config-actions"><span id="plugin-save-note">密码字段留空即保留原值</span><button type="submit">保存插件配置</button></div>
+          </form>
         </section>
       </section>
 
@@ -318,6 +331,18 @@
               <button type="button" data-copy-doc="receipt-poll">复制手动排查地址</button>
             </div>
           </details>
+          <details open>
+            <summary>不知道商户号、门店号、终端号或码牌 ID</summary>
+            <div class="ui-doc-body">
+              <ol>
+                <li>先在“插件配置”保存平台登录账号和密码；直连插件也可保存 Token 或 Cookie。未知编号先留空，配置暂时不完整也可以保存。</li>
+                <li>纯 Docker 插件先确认 Watcher 在线。用目标码牌真实收一笔容易辨认的小额款，等第三方平台显示成功。</li>
+                <li>5 分钟内回到插件编辑区点“查询最近流水”。查询会忽略当前填写的编号筛选，展示平台实际返回的商户、门店、终端和码牌编号。</li>
+                <li>按时间、金额、支付方式和商户名称找到目标流水，点“填入编号”，核对后再保存插件配置。</li>
+              </ol>
+              <p>查询最多展示近 5 分钟的 20 条成功流水，不会创建或确认 EdgePay 订单，也不返回付款人、备注、Cookie 或 Token。平台没有返回的编号会保持空白，不要用订单流水号代替。</p>
+            </div>
+          </details>
           <details>
             <summary>Worker 主动查询：更快确认到账</summary>
             <div class="ui-doc-body">
@@ -337,7 +362,7 @@
             <div class="ui-doc-body">
               <ol>
                 <li>先到 License 站确认域名已经购买对应插件。增购沿用原 License，不需要重新部署 License。</li>
-                <li>在“插件配置”找到插件，填好账号、密钥或收款地址，保存后再打开启用开关。</li>
+                <li>在“插件配置”找到插件，先保存账号、密钥或 Token/Cookie。商户号、门店号和终端号不知道时，按上面的“查询最近流水”流程识别并回填。</li>
                 <li>到“通道管理”新增通道。一个通道只选一种支付方式；同一插件要同时收微信和支付宝时，建两个通道。</li>
                 <li>标注为 Docker Watcher 的插件要保持容器在线。容器里的 <code>WORKER_URL</code>、<code>EDGEPAY_LICENSE</code> 和 <code>TRANSPORT_KEY</code> 必须与当前 Worker 对应。</li>
                 <li>从通道右侧点“测试”，先用小额订单确认收银台、流水匹配和商户回调都正常，再接生产订单。</li>
@@ -352,7 +377,8 @@
             <div class="ui-doc-body">
               <p>运行位置：Worker。实现沿用 MPay 一代的商户平台登录、Token 刷新和成功流水查询流程，不需要挂机容器。</p>
               <ol>
-                <li>填写收钱吧商户平台账号和原始密码。系统登录时会按平台接口要求计算摘要，配置里不要填写摘要后的值。</li>
+                <li>填写并保存收钱吧商户平台账号和原始密码。系统登录时会按平台接口要求计算摘要，配置里不要填写摘要后的值。</li>
+                <li>不知道商户号、门店号或终端号时，先用目标码牌收一笔小额款，再在插件编辑区查询最近流水并一键回填。</li>
                 <li>上传实际码牌二维码，保存并启用插件。一个码牌同时收微信和支付宝时，分别新建两个通道。</li>
                 <li>生成小额测试订单并完成付款。Worker 会查询近几分钟内状态为成功的交易，并按金额、支付方式和订单时间匹配。</li>
                 <li>提示登录失效时，先在收钱吧商户平台确认账号没有设备验证或密码变更，再重新保存配置。</li>

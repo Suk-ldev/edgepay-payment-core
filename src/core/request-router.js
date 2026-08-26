@@ -37,6 +37,9 @@ import {
 } from '../runtime-keys.js';
 import { pluginSupportsWorkerPoll, unsupportedHook } from '../plugin-api.js';
 import { pollReceiptAccount } from '../receipt-poller.js';
+import {
+  receiptDiscoveryAccount, receiptDiscoveryAvailable, sanitizeReceiptDiscoveryRecords,
+} from '../receipt-discovery.js';
 import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
 import { pluginContext } from './plugin-context.js';
@@ -47,6 +50,7 @@ import {
 
 // 插件要额外带给 Watcher / 轮询器的收款信息统一放在订单 metadata 的这个键下。
 const WATCHER_RECEIPT_KEY = 'receipt_watcher';
+const RECEIPT_DISCOVERY_PREFIX = 'receipt_discovery:';
 
 /** 按编码取插件；不存在（没买或没打进这次构建）就报错。 */
 function pluginOf(env, code) {
@@ -1220,6 +1224,45 @@ async function receiptWatcherAccounts(env) {
   return accounts;
 }
 
+function receiptDiscoveryKey(requestId) {
+  const value = String(requestId ?? '').trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) {
+    throw new Error('最近流水查询任务 ID 不合法');
+  }
+  return `${RECEIPT_DISCOVERY_PREFIX}${value}`;
+}
+
+async function receiptWatcherDiscoveries(env, supported) {
+  const cutoff = new Date(Date.now() - (2 * 60 * 1_000)).toISOString();
+  const { results = [] } = await env.DB.prepare(`
+    SELECT setting_key, value_text
+    FROM runtime_settings
+    WHERE setting_key LIKE 'receipt_discovery:%' AND updated_at >= ?
+    ORDER BY updated_at ASC
+  `).bind(cutoff).all();
+  const config = await runtimePluginConfig(env);
+  const discoveries = [];
+  for (const row of results) {
+    const job = parseJson(String(row.value_text ?? ''));
+    const pluginCode = String(job.plugin_code ?? '');
+    if (job.status !== 'pending' || !supported.has(pluginCode)
+      || Date.parse(String(job.expires_at ?? '')) <= Date.now()) continue;
+    const running = { ...job, status: 'running', started_at: timestamp() };
+    const nextValue = JSON.stringify(running);
+    const claimed = await env.DB.prepare(`
+      UPDATE runtime_settings
+      SET value_text = ?, updated_at = ?
+      WHERE setting_key = ? AND value_text = ?
+    `).bind(nextValue, timestamp(), row.setting_key, row.value_text).run();
+    if (Number(claimed.meta?.changes ?? 0) !== 1) continue;
+    discoveries.push({
+      ...receiptDiscoveryAccount(pluginCode, configForPlugin(config, pluginCode)),
+      request_id: job.request_id,
+    });
+  }
+  return discoveries;
+}
+
 async function watcherSnapshot(request, env) {
   const transportSecrets = [
     env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY,
@@ -1243,12 +1286,53 @@ async function watcherSnapshot(request, env) {
     WHERE runtime_settings.updated_at <= ? OR runtime_settings.value_text <> ?
   `).bind(presenceValue, presenceUpdatedAt, presenceThrottle, presenceValue).run();
   const supported = new Set(capabilities);
-  const accounts = (await receiptWatcherAccounts(env)).filter((account) => supported.has(account.plugin_code));
+  const [accounts, discoveries] = await Promise.all([
+    receiptWatcherAccounts(env).then((items) => items.filter((account) => supported.has(account.plugin_code))),
+    receiptWatcherDiscoveries(env, supported),
+  ]);
   return jsonResponse(
-    { generated_at: timestamp(), poll_seconds: 5, accounts },
+    { generated_at: timestamp(), poll_seconds: 5, accounts, discoveries },
     200,
     { 'cache-control': 'no-store' },
   );
+}
+
+async function watcherDiscoveryReport(request, env, requestId) {
+  const contentLength = Number(request.headers.get('content-length') ?? 0);
+  if (contentLength > 256_000) return jsonResponse({ ok: false, error: '最近流水查询结果过大' }, 413);
+  const transportSecrets = [
+    env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY,
+    env.WATCHER_PREVIOUS_TRANSPORT_SECRET,
+  ].filter(Boolean).map(String);
+  let signed;
+  try {
+    signed = await readSignedWatcherPayload(request, transportSecrets);
+  } catch {
+    return unauthorized();
+  }
+  try {
+    const key = receiptDiscoveryKey(requestId);
+    const job = await readPlainJsonSetting(env, key, null);
+    if (!job) return jsonResponse({ ok: false, error: '最近流水查询任务不存在' }, 404);
+    if (String(signed.payload.plugin_code ?? '') !== String(job.plugin_code ?? '')) {
+      return jsonResponse({ ok: false, error: '最近流水查询插件不一致' }, 409);
+    }
+    const completedAt = timestamp();
+    const status = signed.payload.status === 'complete' ? 'complete' : 'error';
+    const next = {
+      ...job,
+      status,
+      completed_at: completedAt,
+      records: status === 'complete' ? sanitizeReceiptDiscoveryRecords(signed.payload.records) : [],
+      error: status === 'error'
+        ? String(signed.payload.error ?? 'Docker Watcher 查询失败').replace(/[\r\n]+/gu, ' ').slice(0, 300)
+        : '',
+    };
+    await writePlainJsonSetting(env, key, next);
+    return jsonResponse({ ok: true, status: next.status });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
 }
 
 async function onlineWatcherPlugins(env, now = Date.now()) {
@@ -2417,6 +2501,75 @@ async function pluginConfigApi(request, env) {
   }
 }
 
+function publicReceiptDiscovery(job) {
+  const expired = !['complete', 'error'].includes(String(job.status))
+    && Date.parse(String(job.expires_at ?? '')) <= Date.now();
+  return {
+    request_id: String(job.request_id ?? ''),
+    plugin_code: String(job.plugin_code ?? ''),
+    status: expired ? 'expired' : String(job.status ?? 'pending'),
+    execution: String(job.execution ?? 'docker'),
+    requested_at: String(job.requested_at ?? ''),
+    completed_at: String(job.completed_at ?? ''),
+    records: Array.isArray(job.records) ? job.records : [],
+    error: expired ? '最近流水查询超时，请确认 Docker Watcher 在线后重试' : String(job.error ?? ''),
+  };
+}
+
+async function pluginReceiptDiscoveryApi(request, env, pluginCode) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  try {
+    const runtime = runtimeOf(env);
+    const plugin = runtime.registry.get(pluginCode);
+    if (!plugin || !receiptDiscoveryAvailable(plugin.manifest)) throw new Error('该插件不需要查询收款终端信息');
+    if (!(await licensedCodes(env)).has(pluginCode)) {
+      return jsonResponse({ ok: false, error: '该插件尚未购买' }, 403);
+    }
+    if (request.method === 'GET') {
+      const requestId = new URL(request.url).searchParams.get('request_id');
+      const job = await readPlainJsonSetting(env, receiptDiscoveryKey(requestId), null);
+      if (!job || job.plugin_code !== pluginCode) return jsonResponse({ ok: false, error: '最近流水查询任务不存在' }, 404);
+      return jsonResponse({ ok: true, ...publicReceiptDiscovery(job) });
+    }
+    if (request.method !== 'POST') return new Response('method_not_allowed', { status: 405 });
+    assertAdminMutationRequest(request);
+    await adminJsonBody(request);
+    const config = configForPlugin(await runtimePluginConfig(env), pluginCode);
+    const account = receiptDiscoveryAccount(pluginCode, config);
+    if (pluginSupportsWorkerPoll(plugin, config)) {
+      const result = await pollReceiptAccount(runtime, env, account);
+      if (result.status === 'busy') throw new Error('该插件正在执行流水查询，请稍后重试');
+      return jsonResponse({
+        ok: true,
+        request_id: '',
+        plugin_code: pluginCode,
+        status: 'complete',
+        execution: 'worker',
+        records: sanitizeReceiptDiscoveryRecords(result.records),
+      });
+    }
+    if (!(await onlineWatcherPlugins(env)).has(pluginCode)) {
+      throw new Error('该插件需要 Docker Watcher 查询；请先启动并确认 Watcher 已在线');
+    }
+    const requestId = crypto.randomUUID();
+    const requestedAt = timestamp();
+    const job = {
+      request_id: requestId,
+      plugin_code: pluginCode,
+      status: 'pending',
+      execution: 'docker',
+      requested_at: requestedAt,
+      expires_at: new Date(Date.now() + (2 * 60 * 1_000)).toISOString(),
+      records: [],
+      error: '',
+    };
+    await writePlainJsonSetting(env, receiptDiscoveryKey(requestId), job);
+    return jsonResponse({ ok: true, ...publicReceiptDiscovery(job) }, 202);
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
 async function licenseStatusApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method !== 'GET') return new Response('method_not_allowed', { status: 405 });
@@ -2682,6 +2835,12 @@ async function route(request, env, ctx) {
   if (pathname === '/api/contact' && request.method === 'GET') return contactConfigApi(env);
   if (pathname === '/api/license/attest' && request.method === 'POST') return licenseAttestationApi(request, env);
   if (pathname === '/api/watcher/snapshot' && request.method === 'GET') return watcherSnapshot(request, env);
+  const watcherDiscoveryMatch = pathname.match(
+    /^\/api\/watcher\/discoveries\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu,
+  );
+  if (watcherDiscoveryMatch && request.method === 'POST') {
+    return watcherDiscoveryReport(request, env, watcherDiscoveryMatch[1]);
+  }
   if (pathname === '/api/watcher/bootstrap' && request.method === 'POST') return watcherBootstrap(request, env);
   if (pathname === '/internal/receipt-poll') return receiptPollTrigger(request, env, ctx);
   if (pathname === '/api/pay/' || pathname === '/api/pay') return new Response('not_found', { status: 404 });
@@ -2713,6 +2872,10 @@ async function route(request, env, ctx) {
   const adminOrderActionMatch = pathname.match(/^\/admin\/api\/orders\/([A-Za-z0-9_-]+)\/([a-z_]+)$/u);
   if (adminOrderActionMatch) {
     return orderActionApi(request, env, ctx, adminOrderActionMatch[1], adminOrderActionMatch[2]);
+  }
+  const adminPluginDiscoveryMatch = pathname.match(/^\/admin\/api\/plugins\/([a-z][a-z0-9_]*)\/recent-receipts$/u);
+  if (adminPluginDiscoveryMatch && ['GET', 'POST'].includes(request.method)) {
+    return pluginReceiptDiscoveryApi(request, env, adminPluginDiscoveryMatch[1]);
   }
   if (pathname === '/admin/api/plugins' && ['GET', 'PUT'].includes(request.method)) return pluginConfigApi(request, env);
   if (pathname === '/admin/api/license' && request.method === 'GET') return licenseStatusApi(request, env);
