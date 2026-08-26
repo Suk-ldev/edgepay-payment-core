@@ -2986,6 +2986,35 @@ async function route(request, env, ctx) {
  * 由 createPaymentWorker 调用，产出 Cloudflare Worker 的 fetch/scheduled。
  * 公开仓库本身不导出 `export default`，所以单靠这里的源码构建不出可部署的 Worker。
  */
+/**
+ * 这一轮 cron 有没有活要干。
+ *
+ * cron 每分钟都会被触发，但绝大多数时候一单都没有。原来不管有没有事都要：
+ * 解密 security_keys、读 channels 和 plugin_config、查授权状态、扫两遍
+ * payment_attempts（expireDuePayments 被直接调一次、receiptWatcherAccounts
+ * 里又调一次）——空跑一次七八个 D1 操作，一天 1440 次全是白烧。
+ *
+ * 这里用一次计数查询把三类活一次问清楚：待支付订单、还在宽限期内的 USDT
+ * 订单（它过期后仍要再等一会儿链上确认）、到点该重投的通知。三个都是 0
+ * 就直接返回。判断条件必须和 receiptWatcherAccounts / dispatchDueNotifications
+ * 各自的取数条件保持一致，宁可多算一次也不能漏掉活。
+ */
+async function hasScheduledWork(env, registry) {
+  const maxGrace = Math.max(0, ...registry.manifests().map((manifest) => manifest.receiptGraceSeconds));
+  const graceCutoff = new Date(Date.now() - (maxGrace * 1_000)).toISOString();
+  const row = await env.DB.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM payment_attempts WHERE status IN ('PENDING', 'PAYING')) AS open_payments,
+      (SELECT COUNT(*) FROM payment_attempts
+        WHERE plugin_code = 'usdt_trc20_receipt' AND status = 'EXPIRED' AND expires_at > ?) AS grace_payments,
+      (SELECT COUNT(*) FROM notification_tasks
+        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?) AS due_notifications
+  `).bind(graceCutoff, timestamp()).first();
+  return Number(row?.open_payments ?? 0)
+    + Number(row?.grace_payments ?? 0)
+    + Number(row?.due_notifications ?? 0) > 0;
+}
+
 export function createHandlers(runtime) {
   const prepare = async (env) => withRuntime(await withRuntimeKeys(env), runtime);
   return {
@@ -2998,6 +3027,9 @@ export function createHandlers(runtime) {
     },
     async scheduled(_controller, env, ctx) {
       ctx.waitUntil((async () => {
+        // 先花一次计数查询问清楚有没有活；没有就到此为止，
+        // 后面那一整套（密钥解密、通道与插件配置、授权状态、两遍订单扫描）全省掉。
+        if (!await hasScheduledWork(env, runtime.registry)) return;
         const runtimeEnv = await prepare(env);
         await Promise.all([expireDuePayments(runtimeEnv), dispatchDueNotifications(runtimeEnv)]);
         await runReceiptPoll(runtimeEnv, ctx, 'scheduled', true);
