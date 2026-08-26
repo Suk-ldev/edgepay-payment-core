@@ -1,16 +1,28 @@
+<div align="center">
+
 # EdgePay Payment Core
 
-EdgePay 支付 Worker 的**程序本体与免费插件源码**。
+可审计的 EdgePay 支付核心、免费插件、收银台与管理后台源码。
 
-> ## 这个仓库不能部署
->
-> 本仓库只用于查看和审计 EdgePay 支付程序的实现。它**不包含**付费插件、License Gate
-> 和商业入口，也**没有 Worker 入口导出**（没有 `export default { fetch, scheduled }`），
-> 因此单靠这里的源码构建不出可运行的 Worker。
->
-> 仓库不保证可安装、可构建、可运行或可部署，也不接受"帮我把它跑起来"类的问题。
->
-> **正式部署只能通过官方部署站完成**：<https://deploy.imsuk.cn>
+![Version](https://img.shields.io/badge/version-2.0.0-2563EB?style=flat-square)
+![JavaScript](https://img.shields.io/badge/JavaScript-ES%20Modules-F7DF1E?style=flat-square&logo=javascript&logoColor=000)
+![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white)
+![Cloudflare D1](https://img.shields.io/badge/Cloudflare-D1-F38020?style=flat-square&logo=cloudflare&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-node:test-339933?style=flat-square&logo=nodedotjs&logoColor=white)
+[![License](https://img.shields.io/badge/license-MIT-16A34A?style=flat-square)](./LICENSE)
+
+[![通过官方部署站部署](https://img.shields.io/badge/官方部署站-立即部署-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://deploy.imsuk.cn)
+[![获取 License](https://img.shields.io/badge/License-获取授权-7C3AED?style=for-the-badge&logo=letsencrypt&logoColor=white)](https://license.imsuk.cn)
+
+</div>
+
+> [!IMPORTANT]
+> 本仓库用于查看、审计和测试支付核心。它不包含付费插件、License Gate 或商业入口，
+> 也没有 `export default { fetch, scheduled }` 形式的 Worker 入口，因此无法单独产出
+> 可部署服务。正式部署与升级只能通过[官方部署站](https://deploy.imsuk.cn)完成。
+
+[功能特性](#功能特性) · [技术栈](#技术栈) · [本地检查](#本地能做什么) ·
+[接口说明](#epay-v1-兼容入口) · [部署](#部署) · [License](#授权)
 
 ## 为什么这样拆
 
@@ -52,7 +64,7 @@ return plugin.createPayment({ config, order, env, helpers });
 ## 本地能做什么
 
 ```bash
-npm install
+npm ci
 npm run check   # 语法检查
 npm test        # 核心合同测试
 ```
@@ -86,12 +98,11 @@ npm test        # 核心合同测试
 ├── src/                      # Worker 源码：路由、插件、鉴权、通知、订单逻辑
 ├── public/                   # 静态资源：收银台、管理后台、客服页
 ├── agent/serverless-watcher/ # 可选 NAS/Docker watcher 使用说明（源码未开源，只发布镜像）
-├── scripts/                  # 部署与密钥初始化脚本
+├── scripts/                  # 静态资源生成、语法检查与维护脚本
 ├── tests/                    # 单元测试
-├── qa/                       # 界面还原度对比截图（QA 记录）
-├── schema.sql                 # D1 表结构
-├── wrangler.toml              # 占位模板：database_id 为空、不含 mTLS 绑定，部署前按需编辑
-└── .dev.vars.example         # 本地开发环境变量模板
+├── schema.sql                # D1 表结构
+├── package.json              # 模块导出与检查命令
+└── .dev.vars.example         # 本地测试变量示例
 ```
 
 ## ePay V1 兼容入口
@@ -270,7 +281,9 @@ URL，`/admin/orders` 可查看每笔订单由 Worker 内置轮询、NAS Watcher
 
 ## 部署
 
-唯一官方入口：<https://deploy.imsuk.cn>
+[![通过官方部署站部署](https://img.shields.io/badge/官方部署站-立即部署-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://deploy.imsuk.cn)
+
+这是唯一受支持的部署入口，所有新建和升级操作都从部署站发起。
 
 部署站会校验你的 Cloudflare Token 与 License，按权益取回对应的商业构建产物
 （逐个文件校验 SHA-256），在你自己的账户里创建 D1、写入 Secrets、上传 Worker 并绑定域名。
@@ -279,9 +292,9 @@ URL，`/admin/orders` 可查看每笔订单由 Worker 内置轮询、NAS Watcher
 
 ## 授权
 
-License 与插件权益在 <https://license.imsuk.cn> 购买与管理，支持自助增购和换绑域名。
-免费插件不需要 License；授权服务不可用时，免费功能不受影响。
+License 与插件权益在 <https://license.imsuk.cn> 获取与管理，支持自助增购和换绑域名。
+部署时 License 用于验证域名与交付权益；运行阶段的免费插件不因授权服务临时不可用而停用。
 
 ## 许可
 
-见 [LICENSE](LICENSE)。
+见 [MIT License](./LICENSE)。
