@@ -1375,14 +1375,27 @@ async function watcherBootstrap(request, env) {
         .map((manifest) => manifest.code),
     });
   }
-  const grant = await runtimeOf(env).license.grantEnvelope(env, {
-    audience: 'watcher',
-    instanceId,
-    publicKey,
-    nonce: String(signed.payload.nonce ?? ''),
-    proofTimestamp: Number(signed.payload.proof_timestamp ?? 0),
-    proofSignature: String(signed.payload.proof_signature ?? ''),
-  });
+  let grant;
+  try {
+    grant = await runtimeOf(env).license.grantEnvelope(env, {
+      audience: 'watcher',
+      instanceId,
+      publicKey,
+      nonce: String(signed.payload.nonce ?? ''),
+      proofTimestamp: Number(signed.payload.proof_timestamp ?? 0),
+      proofSignature: String(signed.payload.proof_signature ?? ''),
+    });
+  } catch (error) {
+    // 这里原来不接错误：授权链路上的任何失败——授权服务不可达、超时、
+    // 设备数超限、License 被停用——都会冒到最外层变成一个不带原因的 500。
+    // watcher 那头只看得到 "HTTP 500"，完全不知道该查哪一段。
+    const reason = String(error?.message ?? error);
+    console.warn('watcher_bootstrap_grant_failed', { instance_id: instanceId, reason });
+    return jsonResponse({ error: `watcher 授权失败：${reason}` }, Number(error?.status) || 502);
+  }
+  if (!grant?.envelope) {
+    return jsonResponse({ error: 'watcher 授权失败：授权服务没有返回 Grant' }, 502);
+  }
   // 付费插件包由 license 站直接下发；把插件包服务地址回给 watcher，避免在公开镜像里硬编码。
   return jsonResponse({
     licensed: true,
