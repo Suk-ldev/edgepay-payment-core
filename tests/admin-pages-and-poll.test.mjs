@@ -11,7 +11,7 @@ test('后台导航使用六个独立 URL，不再使用长页面锚点', async (
   assert.doesNotMatch(html, /data-section-link(?:>|[\s])/u);
 });
 
-test('插件页支持搜索和启停，通道页用下拉框选择支付方式并可新增通道', async () => {
+test('插件页支持搜索和启停，通道页用下拉框选择支付方式并可新增、删除通道', async () => {
   const [html, script] = await Promise.all([
     readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
@@ -27,6 +27,8 @@ test('插件页支持搜索和启停，通道页用下拉框选择支付方式�
   assert.match(script, /<select class="channel-pay-type"/u);
   assert.match(script, /applyChannelFilters/u);
   assert.match(script, /function createChannel\(event\)/u);
+  assert.match(script, /data-delete-channel/u);
+  assert.match(script, /method: 'DELETE'/u);
   assert.match(script, /pay_types: \[payType\]/u);
   assert.doesNotMatch(script, /channel-pay-type:checked/u);
 });
@@ -39,7 +41,7 @@ test('公开管理台只内置免费插件教程，付费插件教程随插件�
   // 付费插件的教程会点名平台接口与登录方式，属于实现细节，不能随公开核心发给所有人。
   // 它们已经搬进各自插件的 manifest.docs，由管理台按实际装载的插件动态渲染。
   const documented = [...html.matchAll(/data-plugin-doc="([a-z0-9_]+)"/gu)].map((match) => match[1]);
-  assert.deepEqual(documented, ['shouqianba_receipt']);
+  assert.deepEqual(documented, []);
   assert.match(html, /id="plugin-docs-dynamic"/u);
   assert.match(script, /renderPluginDocs/u);
   // 回调地址位不再给某个渠道写死，改成对任何带占位的插件文档都生效。
@@ -49,7 +51,22 @@ test('公开管理台只内置免费插件教程，付费插件教程随插件�
   for (const text of ['配置顺序', 'Docker Watcher', '通道管理', '测试']) assert.match(html, new RegExp(text, 'u'));
 });
 
-test('管理后台每次打开都会检查公开仓库版本并提供升级入口', async () => {
+test('付呗和收钱吧教程随插件提供最近流水查号步骤且不拿其他产品作宣传文案', async () => {
+  const [fubei, shouqianba] = await Promise.all([
+    readFile(new URL('../src/free-plugins/fubei-receipt.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/free-plugins/shouqianba-receipt.js', import.meta.url), 'utf8'),
+  ]);
+  for (const source of [fubei, shouqianba]) {
+    assert.match(source, /查询最近流水/u);
+    assert.match(source, /填入编号/u);
+    assert.doesNotMatch(source, /MPay/u);
+  }
+  assert.match(fubei, /device_no/u);
+  assert.match(fubei, /store_id/u);
+  assert.match(fubei, /order_sn.*不能当终端号/u);
+});
+
+test('管理后台会检查发行版本并提供升级入口，但不让它拖慢首屏', async () => {
   const [html, script, worker] = await Promise.all([
     readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
@@ -58,7 +75,12 @@ test('管理后台每次打开都会检查公开仓库版本并提供升级入�
   assert.match(html, /id="version-update-dialog"/u);
   assert.match(html, /原 D1、插件配置、支付通道、环境变量、Secrets、定时任务和路由都会保留/u);
   assert.match(script, /request\('\/admin\/api\/version'\)/u);
-  assert.match(script, /checkVersionUpdate\(\);\s*\nload\(\);/u);
+  // 版本检查排在首屏数据之后：以前它和插件列表同时发出去，插件都回来了页面
+  // 还在等版本转圈。服务端也要缓存，不能每开一次后台就打一次外网。
+  assert.match(script, /load\(\)\.finally\(checkVersionUpdate\)/u);
+  assert.doesNotMatch(script, /checkVersionUpdate\(\);\s*\nload\(\)/u);
+  assert.match(worker, /RELEASE_CHECK_TTL_MS/u);
+  assert.match(worker, /readPlainJsonSetting\(env, RELEASE_CHECK_KEY/u);
   assert.match(script, /location\.assign\(payload\.deploy_url\)/u);
   assert.match(worker, /pathname === '\/admin\/api\/version'/u);
   assert.match(worker, /https:\/\/deploy\.imsuk\.cn\//u);

@@ -252,3 +252,36 @@ test('验证码 cookie 被改过期时间即失效', async () => {
   });
   assert.equal(await verifyLoginPassword(request, env), false);
 });
+
+test('后台字段可以带默认值，密钥字段永远不给', async () => {
+  // 像 USDT 主网合约、TronGrid 地址这种"几乎所有人都填同一个值"的字段，
+  // 空输入框只会让人去翻文档。默认值直接填进框里，存过值的以存的为准。
+  const { definePlugin } = await import('../src/plugin-api.js');
+  const withDefaults = createPluginRegistry([definePlugin({
+    manifest: {
+      code: 'defaults_demo', name: '默认值演示', version: '1.0.0', apiVersion: 1,
+      tier: 'PAID', mode: 'direct', runtime: 'direct', payTypes: ['bank'], required: [],
+      adminFields: [
+        { key: 'contract', label: '合约地址', type: 'text', defaultValue: 'TR7NHq' },
+        { key: 'api_key', label: '密钥', type: 'password', secret: true, defaultValue: '不该出现' },
+        { key: 'plain', label: '无默认值', type: 'text' },
+      ],
+    },
+    createPayment() { return {}; },
+  })]);
+  const fieldsOf = (config) => {
+    const form = coreAdminPluginForms(withDefaults, config).find((item) => item.code === 'defaults_demo');
+    return new Map(form.fields.map((field) => [field.key, field.value]));
+  };
+
+  const untouched = fieldsOf({});
+  assert.equal(untouched.get('contract'), 'TR7NHq', '没存过值时用默认值填框');
+  assert.equal(untouched.get('api_key'), '', '密钥字段不能带出任何默认值');
+  assert.equal(untouched.get('plain'), '', '没有默认值就还是空');
+
+  const saved = fieldsOf({ defaults_demo: { contract: 'TOther' } });
+  assert.equal(saved.get('contract'), 'TOther', '存过值就以存的为准，默认值不能盖掉');
+
+  // 显式存成空字符串是"我就是要留空"，同样不该被默认值顶回来。
+  assert.equal(fieldsOf({ defaults_demo: { contract: '' } }).get('contract'), '');
+});

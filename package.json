@@ -19,8 +19,9 @@
   "scripts": {
     "assets:build": "node scripts/generate-bundled-assets.mjs",
     "assets:verify": "node scripts/generate-bundled-assets.mjs --check",
-    "test": "npm run assets:verify && node --test",
-    "check": "npm run assets:verify && node scripts/check-syntax.mjs",
+    "check:imports": "node scripts/check-missing-imports.mjs",
+    "test": "npm run assets:verify && npm run check:imports && node --test",
+    "check": "npm run assets:verify && npm run check:imports && node scripts/check-syntax.mjs",
     "db:apply": "wrangler d1 execute DB --remote --file=./schema.sql"
   }
 }

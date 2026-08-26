@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f3f7fc" />
     <title>EdgePay · 管理后台</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body class="ui-admin-shell">
@@ -266,6 +267,11 @@
             <dl><div><dt>指纹</dt><dd data-key-fingerprint>—</dd></div><div><dt>上次轮换</dt><dd data-key-rotated>—</dd></div><div><dt>旧密钥有效至</dt><dd data-key-previous>无</dd></div></dl>
             <footer><button type="button" data-rotate-key="watcher">轮换密钥</button><button type="button" data-revoke-key="watcher">撤销旧密钥</button></footer>
           </article>
+          <article class="ui-key-card" data-key-card="poll">
+            <header><div><h3>轮询触发 Token</h3><p>用于外部计划任务调用 <code>/internal/receipt-poll</code>；轮换后要同步更新计划任务里的地址。</p></div><span class="ui-key-state">读取中</span></header>
+            <dl><div><dt>指纹</dt><dd data-key-fingerprint>—</dd></div><div><dt>上次轮换</dt><dd data-key-rotated>—</dd></div><div><dt>旧 Token 有效至</dt><dd data-key-previous>无</dd></div></dl>
+            <footer><button type="button" data-rotate-key="poll">轮换密钥</button><button type="button" data-revoke-key="poll">撤销旧密钥</button></footer>
+          </article>
         </div>
       </section>
 
@@ -372,20 +378,6 @@
           </details>
           <!-- 付费插件的运营文档随插件下发，这里按当前实际装载的插件动态渲染。 -->
           <div id="plugin-docs-dynamic"></div>
-          <details data-plugin-doc="shouqianba_receipt">
-            <summary>收钱吧码牌收款（shouqianba_receipt）</summary>
-            <div class="ui-doc-body">
-              <p>运行位置：Worker。实现沿用 MPay 一代的商户平台登录、Token 刷新和成功流水查询流程，不需要挂机容器。</p>
-              <ol>
-                <li>填写并保存收钱吧商户平台账号和原始密码。系统登录时会按平台接口要求计算摘要，配置里不要填写摘要后的值。</li>
-                <li>不知道商户号、门店号或终端号时，先用目标码牌收一笔小额款，再在插件编辑区查询最近流水并一键回填。</li>
-                <li>上传实际码牌二维码，保存并启用插件。一个码牌同时收微信和支付宝时，分别新建两个通道。</li>
-                <li>生成小额测试订单并完成付款。Worker 会查询近几分钟内状态为成功的交易，并按金额、支付方式和订单时间匹配。</li>
-                <li>提示登录失效时，先在收钱吧商户平台确认账号没有设备验证或密码变更，再重新保存配置。</li>
-              </ol>
-              <p>收钱吧流水中的银行卡或银联交易不会映射成本站银行卡通道；银行卡通道只用于 Stripe 和 PayPal。</p>
-            </div>
-          </details>
           <details>
             <summary>客服页</summary>
             <div class="ui-doc-body">

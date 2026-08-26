@@ -199,6 +199,33 @@ test('回调统计区分官方回调与收款监听并保留次数', () => {
   }, 'wechat_api').status, 'SUCCESS');
 });
 
+test('成功过一次就是成功，后来的未匹配事件不会把已支付订单说成处理中', () => {
+  // 线上现象：一笔 SmsForwarder 订单已经"成功"，监听栏却显示"监听处理中"。
+  // 原因是这一栏先看最新一条事件——确认订单那条是 PROCESSED，之后又来了一条
+  // 没匹配上的 RECEIVED，最新状态就成了处理中。
+  const paidWithLateNoise = {
+    status: 'PAID',
+    callback_times: 2,
+    callback_processed_times: 1,
+    callback_pending_times: 1,
+    receipt_event_state: 'RECEIVED',
+  };
+  assert.equal(summarize(paidWithLateNoise, 'fubei_receipt').status_text, '监听成功');
+  assert.equal(summarize(paidWithLateNoise, 'wechat_api').status_text, '成功');
+  // 次数照旧全部保留，成功之外的那条事件不会从统计里消失。
+  assert.equal(summarize(paidWithLateNoise, 'fubei_receipt').pending_times, 1);
+
+  // 还没终态的订单只有未处理事件时，仍然是处理中。
+  assert.equal(summarize({
+    status: 'PAYING', callback_times: 1, callback_pending_times: 1,
+  }, 'fubei_receipt').status_text, '监听处理中');
+
+  // 订单已经终态还挂着没处理的事件，说明始终没匹配上，不该继续显示处理中。
+  assert.equal(summarize({
+    status: 'EXPIRED', callback_times: 1, callback_pending_times: 1,
+  }, 'fubei_receipt').status_text, '监听失败');
+});
+
 test('订单时间线汇总现有监听、通知、退款和操作记录并按时间倒序', () => {
   const timeline = buildOrderTimeline({
     order: {

@@ -62,6 +62,8 @@ export function fakeReceiptPlugin(code, {
   payTypes = ['alipay', 'wxpay'],
   tier = 'PAID',
   records = [],
+  // 轮询期间的副作用。真实插件确认到账后核心会改写订单，测试用它模拟那一刻。
+  onPoll = null,
 } = {}) {
   return definePlugin({
     manifest: {
@@ -76,7 +78,8 @@ export function fakeReceiptPlugin(code, {
       required: ['receipt_qrcode_image'],
       adminFields: [{ key: 'receipt_qrcode_image', label: '码牌二维码', type: 'image' }],
     },
-    pollReceipts() {
+    async pollReceipts(context) {
+      if (onPoll) await onPoll(context);
       return { records, details: { fake: true }, state: {} };
     },
   });

@@ -107,14 +107,17 @@ export function callbackSummary(row = {}, pluginCode = '', receiptMode = false) 
   const processed = Math.max(0, Number(row.callback_processed_times ?? 0));
   const rejected = Math.max(0, Number(row.callback_rejected_times ?? 0));
   const pending = Math.max(0, Number(row.callback_pending_times ?? 0));
+  // 这一栏回答的是"这笔订单的回调/监听成功过没有"，不是"最后一条事件长什么样"。
+  // 以前先看最新一条事件：SmsForwarder 这类监听插件一笔订单会收到多条通知，
+  // 确认订单的那条是 PROCESSED，之后再来一条没匹配上的 RECEIVED 就会把已经
+  // 支付成功的订单显示成"监听处理中"。只要成功处理过一次，这一栏就是成功。
+  const settled = ['PAID', 'CLOSED', 'EXPIRED', 'FAILED'].includes(String(row.status ?? ''));
   let status = 'NONE';
-  const latestState = String(row.receipt_event_state ?? '');
-  if (latestState === 'PROCESSED') status = 'SUCCESS';
-  else if (latestState === 'REJECTED') status = 'FAILED';
-  else if (latestState === 'RECEIVED') status = 'PROCESSING';
+  if (processed > 0) status = 'SUCCESS';
   else if (rejected > 0) status = 'FAILED';
-  else if (pending > 0) status = 'PROCESSING';
-  else if (processed > 0 || total > 0) status = 'SUCCESS';
+  // 订单已经终态还挂着没处理的事件，说明它始终没匹配上，不是"还在处理"。
+  else if (pending > 0) status = settled ? 'FAILED' : 'PROCESSING';
+  else if (total > 0) status = 'SUCCESS';
   return {
     status,
     status_text: receiptMode

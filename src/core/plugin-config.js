@@ -70,11 +70,14 @@ export function adminPluginForms(registry, config) {
       } : null,
       fields: manifest.adminFields.map((field) => ({
         ...field,
+        // defaultValue 会直接填进输入框：像 USDT 主网合约、TronGrid 地址这种
+        // "几乎所有人都填同一个值"的字段，空框只会让人去翻文档。
+        // 密钥类字段永远不给默认值，图片走各自的默认图逻辑。
         value: field.secret
           ? ''
           : (field.type === 'image'
               ? String(settings[field.key] ?? '').trim()
-              : (settings[field.key] ?? (field.type === 'multiselect' ? [] : ''))),
+              : (settings[field.key] ?? field.defaultValue ?? (field.type === 'multiselect' ? [] : ''))),
         configured: field.secret ? Boolean(settings[field.key]) : undefined,
       })),
     };

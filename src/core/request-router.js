@@ -36,7 +36,8 @@ import {
   publicKeyStatus, revokePreviousRuntimeKey, rotateRuntimeKey, withRuntimeKeys,
 } from '../runtime-keys.js';
 import { pluginSupportsWorkerPoll, unsupportedHook } from '../plugin-api.js';
-import { pollReceiptAccount } from '../receipt-poller.js';
+import { pollReceiptAccount, workerPollerAvailable } from '../receipt-poller.js';
+import { decodeWechatXml, exchangeWechatOAuthCode } from '../wechat-v2-plugin.js';
 import {
   receiptDiscoveryAccount, receiptDiscoveryAvailable, sanitizeReceiptDiscoveryRecords,
 } from '../receipt-discovery.js';
@@ -1501,7 +1502,11 @@ export function receiptPollResponse(accounts, results, startedAt, finishedAt, tr
 async function receiptPollTrigger(request, env, ctx) {
   let authorized = false;
   if (request.method === 'GET') {
-    authorized = verifyStaticPollToken(request, env.POLL_TRIGGER_TOKEN);
+    // 轮询 Token 可以在"密钥管理"里轮换，兼容期内旧 Token 仍然放行，
+    // 这样外部计划任务来得及改地址，不至于一轮换就全部 401。
+    authorized = [env.POLL_TRIGGER_TOKEN, env.POLL_PREVIOUS_TRIGGER_TOKEN]
+      .filter(Boolean)
+      .some((secret) => verifyStaticPollToken(request, secret));
   } else if (request.method === 'POST') {
     const transportSecrets = [
       env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY,
@@ -2288,7 +2293,7 @@ async function cashierPayOrderStatusApi(request, env, ctx) {
   try {
     await expireDuePayments(env);
     const payNo = String(new URL(request.url).searchParams.get('pay_no') ?? '').trim();
-    const payment = await env.DB.prepare(
+    let payment = await env.DB.prepare(
       'SELECT * FROM payment_attempts WHERE payment_no = ?',
     ).bind(payNo).first();
     if (!payment) return cashierApiResponse('支付单不存在', 404);
@@ -2296,13 +2301,21 @@ async function cashierPayOrderStatusApi(request, env, ctx) {
       ? configForPlugin(await runtimePluginConfig(env), payment.plugin_code)
       : {};
     if (payment.status === 'PAYING' && workerPollerAvailable(runtimeOf(env).registry, payment.plugin_code, statusPollConfig)) {
-      ctx.waitUntil(runReceiptPoll(env, ctx, 'cashier_status', true, payment.plugin_code).catch((error) => {
+      try {
+        // 状态接口是收银台的即时查询入口。必须等本轮查账结束后重新读取订单，
+        // 否则即使这轮已经确认到账，响应仍会把查询前的 PAYING 旧对象返回给前端。
+        await runReceiptPoll(env, ctx, 'cashier_status', true, payment.plugin_code);
+      } catch (error) {
         console.warn('cashier_receipt_poll_failed', {
           plugin: payment.plugin_code,
           message: String(error?.message ?? error),
         });
-      }));
+      }
     }
+    // 外部 7 秒触发器也可能刚好在首次 SELECT 后确认订单；返回前统一重读，消除竞态。
+    payment = await env.DB.prepare(
+      'SELECT * FROM payment_attempts WHERE payment_no = ?',
+    ).bind(payNo).first();
     const status = cashierStatus(payment.status);
     return cashierApiResponse({
       pay_no: payment.payment_no,
@@ -2645,7 +2658,7 @@ async function adminChannelData(env, channels = null) {
       const plugin = pluginOrNull(env, channel.plugin_code);
       return {
         ...channel,
-        available_pay_types: [...(plugin?.payTypes ?? [])],
+        available_pay_types: [...(plugin?.manifest.payTypes ?? [])],
         plugin_enabled: pluginEnabled(runtimeOf(env).registry, config, channel.plugin_code),
       };
     }),
@@ -2675,6 +2688,28 @@ async function channelsApi(request, env) {
     }
     await writePlainJsonSetting(env, 'channels', normalized);
     return jsonResponse({ ok: true, ...await adminChannelData(env, normalized) });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
+async function deleteChannelApi(request, env, channelId) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'DELETE') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    const body = await adminJsonBody(request);
+    if (body.confirm !== true) throw new Error('删除通道需要明确确认');
+    const channels = await runtimeChannels(env);
+    const target = channelById(channels, channelId);
+    if (!target) return jsonResponse({ ok: false, error: '支付通道不存在' }, 404);
+    const remaining = channels.filter((channel) => Number(channel.id) !== Number(target.id));
+    await writePlainJsonSetting(env, 'channels', remaining);
+    return jsonResponse({
+      ok: true,
+      message: `支付通道 #${target.id} 已删除，历史订单仍保留`,
+      ...await adminChannelData(env, remaining),
+    });
   } catch (error) {
     return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
   }
@@ -2791,10 +2826,39 @@ async function adminDashboard(request, env) {
   });
 }
 
+const RELEASE_CHECK_KEY = 'release_check';
+const RELEASE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * 带缓存的最新版本查询。
+ *
+ * 原来每打开一次后台都要现查一遍 GitHub（失败再退到部署站），两次外网请求串行，
+ * 插件页要一直等着它转。发行版本一天也变不了几次，没必要每次都问。
+ *
+ * 查不到就继续用上一次的结果：一次网络抖动不该把升级提示弄没。
+ */
+async function cachedLatestRelease(env) {
+  const cached = await readPlainJsonSetting(env, RELEASE_CHECK_KEY, null);
+  const version = String(cached?.version ?? '');
+  const checkedAt = Date.parse(String(cached?.checked_at ?? ''));
+  if (version && Number.isFinite(checkedAt) && Date.now() - checkedAt < RELEASE_CHECK_TTL_MS) {
+    return { version, checked_at: cached.checked_at, fresh: false };
+  }
+  try {
+    const latest = await fetchLatestRelease();
+    const checked = new Date().toISOString();
+    await writePlainJsonSetting(env, RELEASE_CHECK_KEY, { version: latest.version, checked_at: checked });
+    return { version: latest.version, checked_at: checked, fresh: true };
+  } catch (error) {
+    if (version) return { version, checked_at: cached.checked_at, fresh: false };
+    throw error;
+  }
+}
+
 async function adminVersionApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   try {
-    const latest = await fetchLatestRelease();
+    const latest = await cachedLatestRelease(env);
     const deployUrl = new URL('https://deploy.imsuk.cn/');
     deployUrl.searchParams.set('mode', 'upgrade');
     deployUrl.searchParams.set('publicBaseUrl', new URL(request.url).origin);
@@ -2883,6 +2947,10 @@ async function route(request, env, ctx) {
   if (pathname === '/admin/api/site' && ['GET', 'PUT'].includes(request.method)) return siteConfigApi(request, env);
   if (pathname === '/admin/api/keys' && ['GET', 'POST'].includes(request.method)) return keyManagementApi(request, env);
   if (pathname === '/admin/api/channels' && ['GET', 'PUT'].includes(request.method)) return channelsApi(request, env);
+  const adminChannelDeleteMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)$/u);
+  if (adminChannelDeleteMatch && request.method === 'DELETE') {
+    return deleteChannelApi(request, env, adminChannelDeleteMatch[1]);
+  }
   const adminChannelTestRecordsMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)\/test-records$/u);
   if (adminChannelTestRecordsMatch) return channelTestRecordsApi(request, env, adminChannelTestRecordsMatch[1]);
   const adminChannelTestMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)\/test$/u);

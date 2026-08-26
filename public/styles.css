@@ -58,6 +58,9 @@ html [hidden] { display:none !important; }
 .ui-row-action { display:inline-grid; min-height:30px; place-items:center; padding:0 12px; border:1px solid #cfdded; border-radius:5px; color:#0756b8; background:#fff; font-size:12px; font-weight:700; text-decoration:none; cursor:pointer; transition:border-color .16s,background .16s,transform .16s; }
 .ui-row-action:hover { border-color:#0756b8; background:#eef6ff; transform:translateY(-1px); }
 .ui-row-action:disabled { color:#9cabc0; border-color:#e0e8f1; background:#f7f9fc; cursor:not-allowed; transform:none; }
+.ui-row-action-danger { color:#b42332; border-color:#efc7cc; }
+.ui-row-action-danger:hover { color:#921b29; border-color:#d84b5c; background:#fff4f5; }
+.ui-channel-actions { display:flex; align-items:center; gap:7px; white-space:nowrap; }
 .ui-config-editor { margin-top:12px; padding:24px; border:1px solid #cfdced; background:#fff; box-shadow:0 14px 36px #2450800d; }
 .ui-config-editor.entering { animation:ui-editor-in .24s cubic-bezier(.2,.75,.3,1) both; }
 .ui-config-editor>header { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; padding-bottom:18px; border-bottom:1px solid #e7eef7; }

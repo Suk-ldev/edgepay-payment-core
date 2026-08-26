@@ -349,7 +349,7 @@ function renderChannels(channels) {
     <td><label class="ui-inline-field"><span class="sr-only">通道 ${text(channel.id)} 权重</span><input class="channel-weight" type="number" min="0" max="100000" step="1" value="${text(channel.weight)}" /></label><small>相同类型按权重随机</small></td>
     <td><label class="ui-inline-field ui-inline-field--expire"><span class="sr-only">通道 ${text(channel.id)} 订单有效期</span><input class="channel-expire" type="number" min="1" max="1440" step="1" value="${channel.order_expire_minutes == null ? '' : text(channel.order_expire_minutes)}" placeholder="继承全局" /></label><small>${channel.order_expire_minutes == null ? '继承收银台设置' : '分钟'}</small></td>
     <td><label class="ui-channel-toggle"><input class="channel-enabled" type="checkbox" ${channel.enabled ? 'checked' : ''} /><span>${channel.enabled ? '启用' : '停用'}</span></label>${channel.plugin_enabled ? '' : '<small class="danger-text">插件已停用</small>'}</td>
-    <td><button class="ui-row-action" type="button" data-test-channel="${text(channel.id)}" ${channel.enabled && channel.plugin_enabled ? '' : 'disabled'}>测试</button></td>
+    <td><div class="ui-channel-actions"><button class="ui-row-action" type="button" data-test-channel="${text(channel.id)}" ${channel.enabled && channel.plugin_enabled ? '' : 'disabled'}>测试</button><button class="ui-row-action ui-row-action-danger" type="button" data-delete-channel="${text(channel.id)}">删除本通道</button></div></td>
   </tr>`).join('');
   applyChannelFilters();
 }
@@ -1216,8 +1216,33 @@ async function saveChannels() {
   }
 }
 
+async function deleteChannel(channel, button) {
+  if (!confirm(`确认删除支付通道 #${channel.id}「${channel.name}」？\n\n历史订单不会删除；尚未完成的订单将不能再通过本通道继续收款。`)) return;
+  button.disabled = true;
+  try {
+    const response = await request(`/admin/api/channels/${encodeURIComponent(channel.id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ confirm: true }),
+    });
+    channelPluginsState = response.plugins ?? channelPluginsState;
+    renderChannels(response.results ?? []);
+    showNotice(response.message || `支付通道 #${channel.id} 已删除`);
+  } catch (error) {
+    button.disabled = false;
+    showNotice(error.message, 'error');
+  }
+}
+
+// 可轮换的密钥编码，要和 runtime-keys.js 的 ROTATABLE_KEYS 对齐。
+const KEY_CODES = ['epay', 'watcher', 'poll'];
+const KEY_LABELS = {
+  epay: 'ePay V1 商户密钥',
+  watcher: 'Watcher 传输密钥',
+  poll: '轮询触发 Token',
+};
+
 function renderKeys(keys = {}) {
-  for (const code of ['epay', 'watcher']) {
+  for (const code of KEY_CODES) {
     const card = document.querySelector(`[data-key-card="${code}"]`);
     const state = keys[code] ?? {};
     card.querySelector('.ui-key-state').textContent = state.configured ? '已配置' : '未配置';
@@ -1238,7 +1263,7 @@ async function refreshKeys() {
 }
 
 async function rotateKey(code, button) {
-  const label = code === 'epay' ? 'ePay V1 商户密钥' : 'Watcher 传输密钥';
+  const label = KEY_LABELS[code] ?? code;
   if (!confirm(`确认轮换${label}？旧密钥只保留 30 分钟兼容期。`)) return;
   button.disabled = true;
   try {
@@ -1446,6 +1471,12 @@ channelBody.addEventListener('change', (event) => {
   }
 });
 channelBody.addEventListener('click', (event) => {
+  const deleteButton = event.target.closest('[data-delete-channel]');
+  if (deleteButton && !deleteButton.disabled) {
+    const channel = channelsState.find((candidate) => String(candidate.id) === deleteButton.dataset.deleteChannel);
+    if (channel) deleteChannel(channel, deleteButton);
+    return;
+  }
   const button = event.target.closest('[data-test-channel]');
   if (!button || button.disabled) return;
   const channel = channelsState.find((candidate) => String(candidate.id) === button.dataset.testChannel);
@@ -1658,5 +1689,6 @@ versionUpdateDialog.addEventListener('cancel', snoozeVersionUpdate);
   });
 });
 applyAdminSection();
-checkVersionUpdate();
-load();
+// 版本检查不参与首屏：等页面数据到位再问，免得和插件列表抢连接。
+// 服务端那边也做了缓存，正常情况下这一下只是读一次 D1。
+load().finally(checkVersionUpdate);

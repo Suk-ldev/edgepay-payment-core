@@ -36,14 +36,52 @@ function jsString(value) {
   return JSON.stringify(value).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/**
+ * 给 HTML 里引用的静态资源打上内容指纹。
+ *
+ * 资源是 public, max-age=3600，HTML 是 no-store。以前 dashboard.html 直接写
+ * /app.js，升级完 HTML 立刻是新的、app.js 却还能在浏览器里旧一个小时——
+ * 后台会出现"新功能死活不出现"，只能让人手动硬刷新。
+ *
+ * 指纹取自文件内容，所以内容不变就不会变，改一个字节就换一个 URL。
+ * 资源查表用的是 pathname，查询串不参与，服务端不需要跟着改。
+ */
+function fingerprintHtmlReferences(html, assets) {
+  let result = html;
+  // 长路径先替换，避免短路径把长路径的前缀先吃掉。
+  const ordered = [...assets.entries()].sort((left, right) => right[0].length - left[0].length);
+  for (const [assetPath, hash] of ordered) {
+    const pattern = new RegExp(`(["'])${escapeRegExp(assetPath)}(?:\\?[^"']*)?\\1`, 'gu');
+    result = result.replaceAll(pattern, `$1${assetPath}?v=${hash.slice(0, 12)}$1`);
+  }
+  return result;
+}
+
 async function generate() {
   const rows = [];
   const sources = await filesIn(root);
   sources.sort((left, right) => left.localeCompare(right, 'en'));
+
+  // 先把非 HTML 资源的内容指纹算出来，HTML 里的引用才有东西可写。
+  const fingerprints = new Map();
+  for (const full of sources) {
+    const extension = path.extname(full).toLowerCase();
+    if (extension === '.html') continue;
+    const relative = `/${path.relative(root, full).replaceAll('\\', '/')}`;
+    fingerprints.set(relative, createHash('sha256').update(await readFile(full)).digest('hex'));
+  }
+
   for (const full of sources) {
     const relative = `/${path.relative(root, full).replaceAll('\\', '/')}`;
     const extension = path.extname(full).toLowerCase();
-    const bytes = await readFile(full);
+    let bytes = await readFile(full);
+    if (extension === '.html') {
+      bytes = Buffer.from(fingerprintHtmlReferences(bytes.toString('utf8'), fingerprints), 'utf8');
+    }
     const type = MIME_TYPES[extension] ?? 'application/octet-stream';
     const hash = createHash('sha256').update(bytes).digest('hex');
     if (TEXT_EXTENSIONS.has(extension)) {

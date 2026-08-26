@@ -10,9 +10,13 @@ function encryptionSecret(env) {
   return String(env.CONFIG_ENCRYPTION_KEY ?? env.ADMIN_TOKEN ?? '');
 }
 
+const ROTATABLE_KEYS = Object.freeze(['epay', 'watcher', 'poll']);
+
 function keyFallback(env, code) {
   if (code === 'epay') return String(env.EPAY_KEY ?? '');
   if (code === 'watcher') return String(env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY ?? '');
+  // 轮询触发地址里的 token。部署时作为 Worker Secret 写入，轮换后以这里为准。
+  if (code === 'poll') return String(env.POLL_TRIGGER_TOKEN ?? '');
   return '';
 }
 
@@ -77,14 +81,18 @@ export async function runtimeKeyState(env) {
   const stored = await readStore(env);
   const epay = normalizedSlot(stored.epay, keyFallback(env, 'epay'));
   const watcher = normalizedSlot(stored.watcher, keyFallback(env, 'watcher'));
+  const poll = normalizedSlot(stored.poll, keyFallback(env, 'poll'));
   return {
     epay,
     watcher,
+    poll,
     effective: {
       epay_key: epay.current,
       epay_previous_key: validPrevious(epay),
       watcher_key: watcher.current,
       watcher_previous_key: validPrevious(watcher),
+      poll_token: poll.current,
+      poll_previous_token: validPrevious(poll),
     },
   };
 }
@@ -97,6 +105,8 @@ export async function withRuntimeKeys(env) {
     EPAY_PREVIOUS_KEY: effective.epay_previous_key,
     WATCHER_TRANSPORT_SECRET: effective.watcher_key,
     WATCHER_PREVIOUS_TRANSPORT_SECRET: effective.watcher_previous_key,
+    POLL_TRIGGER_TOKEN: effective.poll_token,
+    POLL_PREVIOUS_TRIGGER_TOKEN: effective.poll_previous_token,
   };
 }
 
@@ -115,11 +125,17 @@ export async function publicKeyStatus(env) {
       rotated_at: state.watcher.rotated_at,
       previous_valid_until: validPrevious(state.watcher) ? state.watcher.previous_expires_at : '',
     },
+    poll: {
+      configured: Boolean(state.poll.current),
+      fingerprint: await fingerprint(state.poll.current),
+      rotated_at: state.poll.rotated_at,
+      previous_valid_until: validPrevious(state.poll) ? state.poll.previous_expires_at : '',
+    },
   };
 }
 
 export async function rotateRuntimeKey(env, code) {
-  if (!['epay', 'watcher'].includes(code)) throw new Error('不支持的密钥类型');
+  if (!ROTATABLE_KEYS.includes(code)) throw new Error('不支持的密钥类型');
   const stored = await readStore(env);
   const current = normalizedSlot(stored[code], keyFallback(env, code));
   if (!current.current) throw new Error('当前密钥尚未配置，不能轮换');
@@ -143,7 +159,7 @@ export async function rotateRuntimeKey(env, code) {
 }
 
 export async function revokePreviousRuntimeKey(env, code) {
-  if (!['epay', 'watcher'].includes(code)) throw new Error('不支持的密钥类型');
+  if (!ROTATABLE_KEYS.includes(code)) throw new Error('不支持的密钥类型');
   const stored = await readStore(env);
   const current = normalizedSlot(stored[code], keyFallback(env, code));
   const nextStore = {
