@@ -1,17 +1,9 @@
 /**
- * 收银台状态接口的即时性合同。
+ * 收银台状态接口只读订单，不承担查账。
  *
- * 线上表现：已付款订单直接重载能正确显示"支付成功"，但页面从"支付中"动态切到
- * "支付成功"的那一刻切不过去。两个原因叠在一起：
- *
- * 1. request-router.js 调了 workerPollerAvailable 却没导入它，订单还是 PAYING 时
- *    这一行必然抛 ReferenceError，状态接口直接 400。已付款订单因为短路掉这个判断
- *    才看起来正常——所以"重载能显示成功、动态切换不行"完全对得上。
- * 2. 就算能跑，查账原先是丢给 ctx.waitUntil 的，响应里带的仍是查账之前那个
- *    PAYING 快照。
- *
- * 这里把"响应必须反映查账之后的订单状态"钉成测试：轮询期间发生的任何状态变化，
- * 都要出现在同一次响应里。回退任意一个修复，这组测试都会红。
+ * Worker 内置查账由带 POLL_TRIGGER_TOKEN 的外部计划任务触发；Docker 通道由
+ * Watcher 快照链路处理。浏览器只能定时读取 D1 中已经确认的状态，不能借公开接口
+ * 绕过触发凭据执行渠道查询。
  */
 
 import assert from 'node:assert/strict';
@@ -125,6 +117,7 @@ async function fixture({ onPoll } = {}) {
     ADMIN_USERNAME: 'admin',
     EPAY_PID: '1000',
     EPAY_KEY: 'epay-key',
+    POLL_TRIGGER_TOKEN: 'poll-trigger-token',
     PUBLIC_BASE_URL: 'https://pay.example',
   };
   return { worker, env, database };
@@ -139,7 +132,26 @@ async function readStatus(worker, env) {
   return (await response.json()).data;
 }
 
-test('轮询期间确认到账时，同一次状态响应就返回支付成功', async () => {
+async function triggerReceiptPoll(worker, env) {
+  return worker.fetch(
+    new Request(`https://pay.example/internal/receipt-poll?token=${env.POLL_TRIGGER_TOKEN}`),
+    env,
+    { waitUntil() {} },
+  );
+}
+
+test('收银台状态读取不会触发渠道查账', async () => {
+  let polled = false;
+  const { worker, env } = await fixture({ onPoll() { polled = true; } });
+
+  const data = await readStatus(worker, env);
+
+  assert.equal(polled, false, '公开状态接口不得执行渠道查账');
+  assert.equal(data.status_text, '支付中');
+  assert.equal(data.status, 1);
+});
+
+test('只有带 POLL_TRIGGER_TOKEN 的外部入口触发 Worker 查账', async () => {
   let polled = false;
   const { worker, env, database } = await fixture({
     onPoll(db) {
@@ -150,34 +162,26 @@ test('轮询期间确认到账时，同一次状态响应就返回支付成功',
     },
   });
 
+  const pollResponse = await triggerReceiptPoll(worker, env);
   const data = await readStatus(worker, env);
 
-  assert.equal(polled, true, '状态接口必须真的触发一次 Worker 查账');
-  // 修复前这里是"支付中"：响应用的是查账之前那个订单快照，
-  // 前端要等下一轮 2 秒轮询才可能看到成功，页面就卡在"支付中"。
+  assert.equal(pollResponse.status, 200);
+  assert.equal(polled, true);
+  assert.equal(database.payment.status, 'PAID');
   assert.equal(data.status_text, '支付成功');
   assert.equal(data.status, 2);
-  assert.equal(database.payment.status, 'PAID');
 });
 
-test('轮询没查到到账时状态保持支付中，不会误报成功', async () => {
+test('错误的 POLL_TRIGGER_TOKEN 不能触发查账', async () => {
   let polled = false;
   const { worker, env } = await fixture({ onPoll() { polled = true; } });
 
-  const data = await readStatus(worker, env);
+  const response = await worker.fetch(
+    new Request('https://pay.example/internal/receipt-poll?token=wrong'),
+    env,
+    { waitUntil() {} },
+  );
 
-  assert.equal(polled, true);
-  assert.equal(data.status_text, '支付中');
-  assert.equal(data.status, 1);
-});
-
-test('查账抛错不会让状态接口失败，仍按当前订单状态回答', async () => {
-  const { worker, env } = await fixture({
-    onPoll() { throw new Error('平台登录失效'); },
-  });
-
-  const data = await readStatus(worker, env);
-
-  assert.equal(data.status_text, '支付中');
-  assert.equal(data.pay_no, PAY_NO);
+  assert.equal(response.status, 401);
+  assert.equal(polled, false);
 });

@@ -1169,7 +1169,7 @@ async function receiptWatcherAccounts(env) {
       plugin_code: primaryChannel.plugin_code,
       api_config_id: primaryChannel.id,
       channel_id: primaryChannel.id,
-      receipt_watcher_query_interval_seconds: 5,
+      receipt_watcher_query_interval_seconds: 15,
     };
     const watcherChannels = accountChannels.flatMap((channel) => {
       return watcherChannelPayTypes(channel, plugin).map((payType) => ({
@@ -1216,7 +1216,7 @@ async function receiptWatcherAccounts(env) {
       api_config_id: primaryChannel.id,
       merchant_id: 1,
       config,
-      query_interval_seconds: 5,
+      query_interval_seconds: 15,
       channels: watcherChannels,
       orders: accountOrders,
       refreshed_at: Math.floor(Date.now() / 1_000),
@@ -1292,7 +1292,7 @@ async function watcherSnapshot(request, env) {
     receiptWatcherDiscoveries(env, supported),
   ]);
   return jsonResponse(
-    { generated_at: timestamp(), poll_seconds: 5, accounts, discoveries },
+    { generated_at: timestamp(), poll_seconds: 15, accounts, discoveries },
     200,
     { 'cache-control': 'no-store' },
   );
@@ -2302,33 +2302,14 @@ async function cashierPayOrderApi(request, env) {
   }
 }
 
-async function cashierPayOrderStatusApi(request, env, ctx) {
+async function cashierPayOrderStatusApi(request, env) {
   try {
     await expireDuePayments(env);
     const payNo = String(new URL(request.url).searchParams.get('pay_no') ?? '').trim();
-    let payment = await env.DB.prepare(
+    const payment = await env.DB.prepare(
       'SELECT * FROM payment_attempts WHERE payment_no = ?',
     ).bind(payNo).first();
     if (!payment) return cashierApiResponse('支付单不存在', 404);
-    const statusPollConfig = pluginOrNull(env, payment.plugin_code)?.manifest.runtime === 'hybrid'
-      ? configForPlugin(await runtimePluginConfig(env), payment.plugin_code)
-      : {};
-    if (payment.status === 'PAYING' && workerPollerAvailable(runtimeOf(env).registry, payment.plugin_code, statusPollConfig)) {
-      try {
-        // 状态接口是收银台的即时查询入口。必须等本轮查账结束后重新读取订单，
-        // 否则即使这轮已经确认到账，响应仍会把查询前的 PAYING 旧对象返回给前端。
-        await runReceiptPoll(env, ctx, 'cashier_status', true, payment.plugin_code);
-      } catch (error) {
-        console.warn('cashier_receipt_poll_failed', {
-          plugin: payment.plugin_code,
-          message: String(error?.message ?? error),
-        });
-      }
-    }
-    // 外部 7 秒触发器也可能刚好在首次 SELECT 后确认订单；返回前统一重读，消除竞态。
-    payment = await env.DB.prepare(
-      'SELECT * FROM payment_attempts WHERE payment_no = ?',
-    ).bind(payNo).first();
     const status = cashierStatus(payment.status);
     return cashierApiResponse({
       pay_no: payment.payment_no,
@@ -2907,7 +2888,7 @@ async function route(request, env, ctx) {
   if (pathname === '/api/cashier/confirm' && request.method === 'POST') return cashierConfirmApi(request, env);
   if (pathname === '/api/cashier/pay-order' && request.method === 'GET') return cashierPayOrderApi(request, env);
   if (pathname === '/api/cashier/pay-order-status' && request.method === 'GET') {
-    return cashierPayOrderStatusApi(request, env, ctx);
+    return cashierPayOrderStatusApi(request, env);
   }
   if (pathname === '/api/contact' && request.method === 'GET') return contactConfigApi(env);
   if (pathname === '/api/license/attest' && request.method === 'POST') return licenseAttestationApi(request, env);

@@ -41,7 +41,7 @@ const NOTIFY_STATUS_LABELS = Object.freeze({
 
 const LISTENER_SOURCE_LABELS = Object.freeze({
   worker_poller: 'Worker 内置轮询',
-  nas_watcher: 'NAS Watcher',
+  watcher: 'Watcher',
   sms_forwarder: 'SmsForwarder',
   provider_webhook: '官方支付回调',
   provider_query: '后台主动查询',
@@ -362,7 +362,7 @@ export function confirmationSource(row = {}) {
 
   if (!code && eventSource) {
     if (['wxpay_receipt', 'alipay_receipt'].includes(eventSource)) code = 'sms_forwarder';
-    else if (['fubei_receipt', 'usdt_trc20_receipt'].includes(eventSource)) code = 'nas_watcher';
+    else if (['fubei_receipt', 'usdt_trc20_receipt'].includes(eventSource)) code = 'watcher';
     else code = 'provider_webhook';
   }
   if (!code) code = String(metadata.payment_confirmation?.source ?? '').trim();

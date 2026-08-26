@@ -34,7 +34,7 @@ chmod 600 .env
 WORKER_URL=https://pay.example.com
 TRANSPORT_KEY=部署完成页的-WATCHER_TRANSPORT_SECRET
 EDGEPAY_LICENSE=从-license.imsuk.cn-生成的-EPL1-License
-POLL_SECONDS=5
+POLL_SECONDS=15
 MAX_CONCURRENCY=2
 WATCHER_STORAGE_DIR=/app/var/storage
 ```

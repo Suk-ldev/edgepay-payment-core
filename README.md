@@ -79,7 +79,7 @@ npm test        # 核心合同测试
   码牌收款、USDT TRC20。
 - **管理后台**：商户与收银台设置、插件配置、通道启停与权重路由、订单管理与手动补单、
   重新通知、退款、通道人工测试。
-- **收款确认多重兜底**：官方异步回调、Worker 内置轮询、NAS Watcher、主动查询、
+- **收款确认多重兜底**：官方异步回调、Worker 内置轮询、Watcher、主动查询、
   手动补单，多路径通过 D1 唯一约束去重。
 - **加密存储**：插件配置使用 AES-GCM 加密后存入 D1，不在环境变量中重复保存密钥。
 
@@ -261,7 +261,7 @@ POST /internal/receipt-poll
 
 该入口与 `/api/watcher/snapshot` 使用相同的 `WATCHER_TRANSPORT_SECRET` 和 HMAC 协议。
 每个插件使用 D1 `runtime_settings` 中的独立租约，阻止外部高频触发造成同一插件并发
-查询；登录 Cookie 和 Token 使用现有 `CONFIG_ENCRYPTION_KEY` 加密保存。NAS Watcher 与 Worker
+查询；登录 Cookie 和 Token 使用现有 `CONFIG_ENCRYPTION_KEY` 加密保存。Watcher 与 Worker
 内置轮询可以同时运行，最终由 `receipt_events(source,event_id)` 唯一约束去重。
 
 不便发送 HMAC 的外部计划任务可使用只具备轮询权限的静态 URL：
@@ -280,7 +280,7 @@ Secret。接口没有活动订单时不会请求平台或 TronGrid。USDT 在页
 响应始终是可读 JSON：顶层 `status` / `message` 给出本轮结论，`summary` 包含当前待监听
 订单数、发现流水数、确认成功数、重复数、忽略数和失败数；`results` 按插件列出本轮
 确认的支付单号及失败原因。管理后台 `/admin/docs` 会在登录后显示并复制当前完整触发
-URL，`/admin/orders` 可查看每笔订单由 Worker 内置轮询、NAS Watcher、SmsForwarder、
+URL，`/admin/orders` 可查看每笔订单由 Worker 内置轮询、Watcher、SmsForwarder、
 官方回调、主动查询或手动补单中的哪一种方式确认。
 
 通道配置的 `order_expire_minutes` 可覆盖全局订单有效期；留空时继承收银台设置。旧通道

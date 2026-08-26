@@ -94,7 +94,7 @@ test('冻结订单只保留解冻动作', () => {
   assert.deepEqual(actions, ['unfreeze']);
 });
 
-test('订单确认来源可区分 Worker、NAS、SmsForwarder 与手动补单', () => {
+test('订单确认来源可区分 Worker、Watcher、SmsForwarder 与手动补单', () => {
   assert.deepEqual(
     confirmationSource({
       receipt_event_source: 'fubei_receipt',
@@ -112,8 +112,8 @@ test('订单确认来源可区分 Worker、NAS、SmsForwarder 与手动补单', 
   );
   assert.equal(confirmationSource({
     receipt_event_source: 'usdt_trc20_receipt',
-    receipt_event_raw_json: JSON.stringify({ delivery_source: 'nas_watcher' }),
-  }).label, 'NAS Watcher');
+    receipt_event_raw_json: JSON.stringify({ delivery_source: 'watcher' }),
+  }).label, 'Watcher');
   assert.equal(confirmationSource({
     receipt_event_source: 'wxpay_receipt',
     receipt_event_raw_json: '{}',

@@ -76,6 +76,16 @@ test('收银台前端不带上一代品牌，也不引用打不开的默认 logo
   }
 });
 
+test('收银台状态轮询遇到一次请求失败后仍会继续重试', async () => {
+  const bundle = await readFile(new URL('../public/cashier/assets/cashier.js', import.meta.url), 'utf8');
+  // 这个前端只有发行后的 bundle；轮询函数原先把请求结果用 && 接到下一轮调度，
+  // 但请求异常也返回 false，任意一次 400 或网络抖动都会永久停止轮询。异常应返回
+  // true 继续下一轮；终态和路由变化仍返回 false，避免留下重复定时器。
+  const statusPoll = bundle.match(/async function m\(\)\{if\(n\.value===``\).*?\}function h\(\)/u)?.[0] ?? '';
+  assert.match(statusPoll, /catch\{return!0\}/u);
+  assert.match(bundle, /async function _\(\)\{o=null,await m\(\)&&g\(\)\}/u);
+});
+
 test('内嵌静态资源保持 GET/HEAD/404 边界', async () => {
   assert.equal((await fetchBundledAsset(new Request('https://pay.example/styles.css', { method: 'HEAD' }))).status, 200);
   assert.equal((await fetchBundledAsset(new Request('https://pay.example/missing'))).status, 404);
