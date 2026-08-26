@@ -158,6 +158,28 @@ async function checkVersionUpdate() {
  * 立即失效，但**新买的插件要回 Deploy 站升级一次才会进包**。这里把这一步显式提示出来，
  * 并把域名带过去，避免客户买完在管理台里找不到而误以为没生效。
  */
+/**
+ * License 校验失败时，付费插件会全部退回"未购买"。以前这里什么都不说，
+ * 于是"我买了、也部署了，却显示未购买"变成一个查不动的问题——把真实原因摆出来。
+ */
+function renderLicenseProblem(license) {
+  const host = document.querySelector('#license-problem');
+  if (!host) return;
+  if (license.licensed || !license.error) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  host.innerHTML = `<div class="ui-alert ui-alert-error">
+    <div>
+      <strong>License 校验没有通过，付费插件暂时按未购买处理</strong>
+      <p>${text(license.error)}</p>
+      <p>免费插件不受影响。确认 Worker 的 <code>EDGEPAY_LICENSE</code> 与授权域名一致后刷新重试。</p>
+    </div>
+  </div>`;
+}
+
 function renderPendingInstall(pending, upgradeUrl, license) {
   const host = document.querySelector('#plugins-pending-install');
   if (!host) return;
@@ -1165,6 +1187,7 @@ async function load({ keepEditor = false } = {}) {
       pluginForms = plugins.forms;
       pluginsState = plugins.results;
       renderPlugins(plugins.results);
+      renderLicenseProblem(plugins.license ?? {});
       renderPendingInstall(plugins.pending_install ?? [], plugins.upgrade_url ?? '', plugins.license ?? {});
       renderPluginDocs(plugins.results);
       if (!keepEditor) closePluginEditor();

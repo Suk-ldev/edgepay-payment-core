@@ -2617,7 +2617,14 @@ async function adminLogin(request, env) {
   }
   if (request.method !== 'POST') return adminLoginRedirect(request);
   const result = await verifyAdminLogin(request, env);
-  if (!result.ok) return adminLoginRedirect(request, result);
+  if (!result.ok) {
+    // 失败的登录必须同时作废已有会话，否则跳回 /admin/login 时那个 GET 会看到
+    // 旧 cookie 仍然有效，直接把人送进 /admin/site——看起来就像"随便填也能进"。
+    const redirect = adminLoginRedirect(request, result);
+    const response = new Response(redirect.body, redirect);
+    response.headers.append('set-cookie', clearAdminSession());
+    return response;
+  }
   return adminRedirectWithCookie(new URL('/admin/site', request.url), await createAdminSession(env));
 }
 

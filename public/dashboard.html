@@ -105,6 +105,8 @@
       <section id="plugins" class="ui-section" hidden>
         <div class="ui-section-heading"><div><h2>插件配置</h2></div></div>
         <!-- 已购但当前 Worker 里没有的插件：按权益出货后新增插件需要回 Deploy 站升级一次。 -->
+        <!-- License 校验失败的真实原因；不显示的话"显示未购买"就无从排查。 -->
+        <div id="license-problem" hidden></div>
         <div id="plugins-pending-install" hidden></div>
         <form id="plugin-filters" class="ui-plugin-filters">
           <label>

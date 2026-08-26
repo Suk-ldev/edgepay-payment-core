@@ -31,6 +31,27 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto;
 if (!globalThis.btoa) globalThis.btoa = (value) => Buffer.from(value, 'binary').toString('base64');
 if (!globalThis.atob) globalThis.atob = (value) => Buffer.from(value, 'base64').toString('binary');
 
+/** 登录失败计数用的内存 D1 替身。 */
+function memoryLoginDb() {
+  const limits = new Map();
+  return {
+    prepare(sql) {
+      return {
+        values: [],
+        bind(...values) { this.values = values; return this; },
+        async first() { return limits.get(this.values[0]) ?? null; },
+        async run() {
+          if (/^DELETE FROM admin_login_limits/u.test(sql.trim())) limits.delete(this.values[0]);
+          else limits.set(this.values[0], {
+            failure_count: this.values[1], locked_until: this.values[2], updated_at: this.values[3],
+          });
+          return { meta: { changes: 1 } };
+        },
+      };
+    },
+  };
+}
+
 test('管理员登录建立 HTTP-only 签名会话', async () => {
   const limits = new Map();
   const DB = {
@@ -160,4 +181,56 @@ test('支付宝个人监听保持原 MPay 手机监听与收款码二选一约�
 
 test('新安装不预置通道，管理员自行添加实际支付通道', () => {
   assert.deepEqual(parseChannels(), []);
+});
+
+test('验证码答案不进 cookie：拿到 cookie 也读不出答案', async () => {
+  const env = { ADMIN_USERNAME: 'admin', ADMIN_TOKEN: 'test-admin-token', DB: memoryLoginDb() };
+  const response = await adminCaptchaResponse(env);
+  const svg = await response.text();
+  const code = [...svg.matchAll(/>([A-Z0-9])<\/text>/gu)].map((match) => match[1]).join('');
+  const cookie = response.headers.get('set-cookie').split(';', 1)[0];
+  const value = cookie.slice(cookie.indexOf('=') + 1);
+  const payload = value.slice(0, value.lastIndexOf('.'));
+
+  // 曾经这里放的是 base64 的 {"code":"6U7Y"}，浏览器里直接就能读出答案，
+  // 验证码等于形同虚设。现在 payload 只有过期时间和随机盐。
+  const decoded = Buffer.from(payload.replaceAll('-', '+').replaceAll('_', '/'), 'base64').toString('utf8');
+  assert.doesNotMatch(decoded, /code/u);
+  assert.doesNotMatch(decoded, new RegExp(code, 'u'));
+  assert.match(decoded, /expires_at/u);
+  assert.match(decoded, /salt/u);
+  // 整段 cookie 里也不能明文出现答案。
+  assert.ok(!value.includes(code));
+
+  const login = (captcha) => new Request('https://pay.example/admin/login', {
+    method: 'POST',
+    headers: { cookie },
+    body: new URLSearchParams({ username: 'admin', password: 'test-admin-token', captcha }).toString(),
+  });
+  assert.equal(await verifyLoginPassword(login(code), env), true);
+  assert.equal(await verifyLoginPassword(login(code.toLowerCase()), env), true);
+  assert.equal(await verifyLoginPassword(login('ZZZZ'), env), false);
+});
+
+test('验证码 cookie 被改过期时间即失效', async () => {
+  const env = { ADMIN_USERNAME: 'admin', ADMIN_TOKEN: 'test-admin-token', DB: memoryLoginDb() };
+  const response = await adminCaptchaResponse(env);
+  const svg = await response.text();
+  const code = [...svg.matchAll(/>([A-Z0-9])<\/text>/gu)].map((match) => match[1]).join('');
+  const cookie = response.headers.get('set-cookie').split(';', 1)[0];
+  const value = cookie.slice(cookie.indexOf('=') + 1);
+  const payload = value.slice(0, value.lastIndexOf('.'));
+  const proof = value.slice(value.lastIndexOf('.') + 1);
+
+  // 证明同时绑定 payload 与答案，所以延长有效期也会让它对不上。
+  const decoded = JSON.parse(Buffer.from(payload.replaceAll('-', '+').replaceAll('_', '/'), 'base64').toString('utf8'));
+  decoded.expires_at = Date.now() + 86_400_000;
+  const forged = Buffer.from(JSON.stringify(decoded), 'utf8').toString('base64')
+    .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+  const request = new Request('https://pay.example/admin/login', {
+    method: 'POST',
+    headers: { cookie: `admin_captcha=${forged}.${proof}` },
+    body: new URLSearchParams({ username: 'admin', password: 'test-admin-token', captcha: code }).toString(),
+  });
+  assert.equal(await verifyLoginPassword(request, env), false);
 });

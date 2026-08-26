@@ -47,9 +47,29 @@ function randomCaptcha() {
   return [...bytes].map((byte) => chars[byte % chars.length]).join('');
 }
 
+function normalizeCaptcha(value) {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+/**
+ * 对验证码答案的证明。答案本身不进 cookie——之前 cookie 里放的是
+ * base64 的 {"code":"6U7Y"}，谁都能在浏览器里直接读出答案，验证码等于没有。
+ * 现在只存这个 HMAC，校验时用**提交上来的**答案重算再比对：
+ * 拿到 cookie 也反推不出答案，只能靠提交去猜，而登录本身有失败次数限制。
+ */
+function captchaProof(secret, payload, code) {
+  return hmac(secret, `EDGE_ADMIN_CAPTCHA
+${payload}
+${normalizeCaptcha(code)}`);
+}
+
 async function signedCaptcha(secret, code) {
-  const payload = base64UrlEncode(JSON.stringify({ code, expires_at: Date.now() + CAPTCHA_SECONDS * 1000 }));
-  return `${payload}.${await hmac(secret, payload)}`;
+  // 盐让同一个答案每次生成的 cookie 都不同，避免按 cookie 值反查答案。
+  const payload = base64UrlEncode(JSON.stringify({
+    expires_at: Date.now() + CAPTCHA_SECONDS * 1000,
+    salt: crypto.randomUUID(),
+  }));
+  return `${payload}.${await captchaProof(secret, payload, code)}`;
 }
 
 async function verifyCaptcha(request, secret, supplied) {
@@ -57,12 +77,11 @@ async function verifyCaptcha(request, secret, supplied) {
   const separator = token.lastIndexOf('.');
   if (!token || separator < 1) return false;
   const payload = token.slice(0, separator);
-  if (!equalText(token.slice(separator + 1), await hmac(secret, payload))) return false;
-  try {
-    const data = JSON.parse(base64UrlDecode(payload));
-    return Number(data.expires_at) > Date.now()
-      && equalText(String(data.code ?? '').toUpperCase(), String(supplied ?? '').trim().toUpperCase());
-  } catch { return false; }
+  let data;
+  try { data = JSON.parse(base64UrlDecode(payload)); } catch { return false; }
+  if (!(Number(data?.expires_at) > Date.now())) return false;
+  // 证明同时绑定了 payload 和答案，所以改过期时间也会让它对不上，不用再单独验签。
+  return equalText(token.slice(separator + 1), await captchaProof(secret, payload, supplied));
 }
 
 function captchaSvg(code) {
