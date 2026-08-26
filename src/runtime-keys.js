@@ -13,10 +13,10 @@ function encryptionSecret(env) {
 const ROTATABLE_KEYS = Object.freeze(['epay', 'watcher', 'poll']);
 
 function keyFallback(env, code) {
-  if (code === 'epay') return String(env.EPAY_KEY ?? '');
-  if (code === 'watcher') return String(env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY ?? '');
+  if (code === 'epay') return String(env.EPAY_KEY ?? '').trim();
+  if (code === 'watcher') return String(env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY ?? '').trim();
   // 轮询触发地址里的 token。部署时作为 Worker Secret 写入，轮换后以这里为准。
-  if (code === 'poll') return String(env.POLL_TRIGGER_TOKEN ?? '');
+  if (code === 'poll') return String(env.POLL_TRIGGER_TOKEN ?? '').trim();
   return '';
 }
 

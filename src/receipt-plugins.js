@@ -18,9 +18,10 @@ function timingSafeTextEqual(left, right) {
 }
 
 export function verifyStaticPollToken(request, secret) {
-  const expected = String(secret ?? '');
+  // 同上：两端一起 trim，避免把计划任务地址里多出来的空白当成不同的 Token。
+  const expected = String(secret ?? '').trim();
   if (request.method !== 'GET' || !expected) return false;
-  const provided = new URL(request.url).searchParams.get('token') ?? '';
+  const provided = String(new URL(request.url).searchParams.get('token') ?? '').trim();
   return timingSafeTextEqual(provided, expected);
 }
 
@@ -157,7 +158,12 @@ export async function readSignedWatcherPayload(request, secret, nowSeconds = Dat
   const timestamp = String(request.headers.get('x-watcher-timestamp') ?? '').trim();
   const signature = String(request.headers.get('x-watcher-signature') ?? '').trim();
   const seconds = Number(timestamp);
-  const secrets = (Array.isArray(secret) ? secret : [secret]).filter(Boolean).map(String);
+  // 两端都要 trim，而且必须一致。密钥从部署完成页复制、粘进 docker run 的引号里、
+  // 或填进 Cloudflare 面板时，很容易多带一个换行。只有一端 trim 会让签名全部对不上，
+  // 而错误只有一句 401，根本看不出是多了个看不见的字符。
+  const secrets = (Array.isArray(secret) ? secret : [secret])
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean);
   if (!secrets.length || !timestamp || !signature || !Number.isFinite(seconds) || Math.abs(nowSeconds - seconds) > 300) {
     throw new Error('监听器签名参数不完整或已失效');
   }
@@ -181,7 +187,12 @@ export async function verifyWatcherSnapshotRequest(request, secret, nowSeconds =
   const timestamp = String(request.headers.get('x-watcher-timestamp') ?? '').trim();
   const signature = String(request.headers.get('x-watcher-signature') ?? '').trim();
   const seconds = Number(timestamp);
-  const secrets = (Array.isArray(secret) ? secret : [secret]).filter(Boolean).map(String);
+  // 两端都要 trim，而且必须一致。密钥从部署完成页复制、粘进 docker run 的引号里、
+  // 或填进 Cloudflare 面板时，很容易多带一个换行。只有一端 trim 会让签名全部对不上，
+  // 而错误只有一句 401，根本看不出是多了个看不见的字符。
+  const secrets = (Array.isArray(secret) ? secret : [secret])
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean);
   if (!secrets.length || !timestamp || !signature || !Number.isFinite(seconds) || Math.abs(nowSeconds - seconds) > 300) {
     return false;
   }

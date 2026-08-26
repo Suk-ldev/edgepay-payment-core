@@ -227,3 +227,19 @@ test('watcher 密钥轮换兼容期内接受旧传输密钥', async () => {
   );
   assert.equal(result.payload.record.order_no, 'FUBEI-OLD-KEY');
 });
+
+test('密钥两端都去空白：Worker 和 watcher 必须归一化到同一个值', async () => {
+  // 线上现象：watcher 报 "授权启动 HTTP 401"。
+  // 起因是只给 watcher 加了 trim，Worker 侧没加——Worker Secret 里带着粘贴时
+  // 多出来的换行时，两边算出来的签名就对不上，而错误只有一句 401。
+  const { verifyStaticPollToken } = await import('../src/receipt-plugins.js');
+  const token = 'poll-token-abc';
+  const request = new Request(`https://worker.example/internal/receipt-poll?token=${token}`);
+  // Worker Secret 带换行、请求里是干净值 —— 必须仍然认得。
+  assert.equal(verifyStaticPollToken(request, `\n ${token} \n`), true);
+  // 反过来也一样。
+  const dirtyRequest = new Request(`https://worker.example/internal/receipt-poll?token=${encodeURIComponent(` ${token} `)}`);
+  assert.equal(verifyStaticPollToken(dirtyRequest, token), true);
+  // 去掉空白之后仍然不同的，照样要拒绝。
+  assert.equal(verifyStaticPollToken(request, 'other-token'), false);
+});
