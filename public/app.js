@@ -66,6 +66,7 @@ const ADMIN_SECTIONS = Object.freeze({
   site: '收银台设置',
   plugins: '插件配置',
   channels: '通道管理',
+  alerts: '渠道通知',
   orders: '支付订单',
   keys: '密钥管理',
   docs: '使用文档',
@@ -1354,6 +1355,9 @@ async function load({ keepEditor = false } = {}) {
       const channels = await request('/admin/api/channels');
       channelPluginsState = channels.plugins ?? [];
       renderChannels(channels.results);
+    } else if (activeAdminSection === 'alerts') {
+      const alerts = await request('/admin/api/alerts');
+      renderAlertConfig(alerts.config);
     } else if (activeAdminSection === 'orders') {
       await loadOrders();
     } else if (activeAdminSection === 'keys') {
@@ -1689,6 +1693,83 @@ versionUpdateDialog.addEventListener('cancel', snoozeVersionUpdate);
     }
   });
 });
+/**
+ * 渲染渠道通知设置。
+ *
+ * token 永远不会从服务端回显（后台没有任何需要看见它的理由），所以输入框留空
+ * 就代表"不改"；这里只用 token_configured 决定提示语。
+ */
+function renderAlertConfig(config = {}) {
+  const form = document.querySelector('#alert-form');
+  if (!form) return;
+  form.elements.enabled.value = config.enabled ? 'on' : 'off';
+  form.elements.provider.value = String(config.provider ?? '');
+  form.elements.url.value = String(config.url ?? '');
+  form.elements.min_interval_seconds.value = String(config.min_interval_seconds ?? 600);
+  form.elements.token.value = '';
+  form.elements.token.placeholder = config.token_configured ? '已配置，留空保留原值' : '未配置';
+  applyAlertProviderFields();
+}
+
+/** 按渠道显示对应字段：Server酱/PushPlus 要 token，企业微信/自定义要地址。 */
+function applyAlertProviderFields() {
+  const form = document.querySelector('#alert-form');
+  if (!form) return;
+  const provider = form.elements.provider.value;
+  form.querySelector('[data-alert-field="token"]').hidden = !['serverchan', 'pushplus'].includes(provider);
+  form.querySelector('[data-alert-field="url"]').hidden = !['wecom', 'webhook'].includes(provider);
+}
+
+function alertFormPayload() {
+  const data = new FormData(document.querySelector('#alert-form'));
+  return {
+    enabled: data.get('enabled') === 'on',
+    provider: data.get('provider'),
+    token: data.get('token'),
+    url: data.get('url'),
+    min_interval_seconds: Number(data.get('min_interval_seconds')),
+  };
+}
+
+document.querySelector('#alert-provider')?.addEventListener('change', applyAlertProviderFields);
+
+document.querySelector('#alert-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = event.submitter ?? event.target.querySelector('button[type="submit"]');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  try {
+    const response = await request('/admin/api/alerts', {
+      method: 'PUT',
+      body: JSON.stringify(alertFormPayload()),
+    });
+    renderAlertConfig(response.config);
+    showNotice('通知设置已保存');
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '保存通知设置';
+  }
+});
+
+document.querySelector('#alert-test')?.addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = '发送中…';
+  try {
+    // 先存再发：否则刚改完还没保存就点测试，验的是上一次的配置。
+    await request('/admin/api/alerts', { method: 'PUT', body: JSON.stringify(alertFormPayload()) });
+    await request('/admin/api/alerts/test', { method: 'POST', body: JSON.stringify({}) });
+    showNotice('测试消息已发出，请到对应渠道查看');
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '发送测试';
+  }
+});
+
 applyAdminSection();
 // 版本检查不参与首屏：等页面数据到位再问，免得和插件列表抢连接。
 // 服务端那边也做了缓存，正常情况下这一下只是读一次 D1。

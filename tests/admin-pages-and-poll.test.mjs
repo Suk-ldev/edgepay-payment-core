@@ -3,9 +3,9 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { receiptPollResponse } from '../src/index.js';
 
-test('后台导航使用六个独立 URL，不再使用长页面锚点', async () => {
+test('后台导航使用七个独立 URL，不再使用长页面锚点', async () => {
   const html = await readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8');
-  for (const section of ['site', 'plugins', 'channels', 'orders', 'keys', 'docs']) {
+  for (const section of ['site', 'plugins', 'channels', 'alerts', 'orders', 'keys', 'docs']) {
     assert.match(html, new RegExp(`href="/admin/${section}" data-section-link="${section}"`, 'u'));
   }
   assert.doesNotMatch(html, /data-section-link(?:>|[\s])/u);

@@ -43,7 +43,8 @@ import {
 } from '../receipt-discovery.js';
 import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
-import { onlineWatcherPlugins, presenceKey, recordWatcherPresence } from '../watcher-presence.js';
+import { onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances } from '../watcher-presence.js';
+import { emitAlert, clearAlert, normalizeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
 import { pluginContext } from './plugin-context.js';
 import { runtimeOf, withRuntime } from './runtime-env.js';
 import {
@@ -1393,6 +1394,114 @@ async function watcherBootstrap(request, env) {
     // 包下发地址由 License 客户端提供，公开核心不硬编码授权服务地址。
     package_base_url: await runtimeOf(env).license.packageBaseUrl(env),
   });
+}
+
+/**
+ * 统一告警推送的后台配置。
+ *
+ * token 走加密设置存储，读回时只说"配没配"，不回明文——后台页面没有任何
+ * 需要看见它的理由。
+ */
+async function alertConfigApi(request, env) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  const secret = settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '');
+  if (request.method === 'GET') {
+    return jsonResponse({ config: publicAlertConfig(await readAlertConfig(env, secret)) });
+  }
+  if (request.method !== 'PUT') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    const body = await adminJsonBody(request);
+    const next = normalizeAlertConfig(body);
+    // 留空表示"不改"，否则每次保存都得把 token 重新粘一遍。
+    if (!next.token) next.token = (await readAlertConfig(env, secret)).token;
+    await writeAlertConfig(env, secret, next);
+    return jsonResponse({ ok: true, config: publicAlertConfig(next) });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
+/** 后台"发一条测试"。绕开静默期，否则刚配好想验一下反而被自己的节流挡住。 */
+async function alertTestApi(request, env) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'POST') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    const secret = settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '');
+    const config = await readAlertConfig(env, secret);
+    if (!config.enabled || !config.provider) {
+      return jsonResponse({ ok: false, error: '推送尚未启用' }, 400);
+    }
+    const result = await deliverAlert(config, {
+      event: 'test',
+      level: 'info',
+      title: 'EdgePay 推送测试',
+      message: `这是一条测试消息，发出时间 ${timestamp()}。收到即说明推送配置可用。`,
+    });
+    return jsonResponse(result.ok ? { ok: true } : { ok: false, error: result.error }, result.ok ? 200 : 502);
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
+/**
+ * 外部监听器上报告警。
+ *
+ * 复用 Watcher 那套 HMAC 签名，不另开一套凭据：能拉快照的组件本来就被信任，
+ * 让它顺手报个警不需要新的信任关系。yyb-bridge 的"微信掉登录"就走这里。
+ */
+async function watcherAlertApi(request, env) {
+  const transportSecrets = [
+    env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY,
+    env.WATCHER_PREVIOUS_TRANSPORT_SECRET,
+  ].filter(Boolean).map(String);
+  let signed;
+  try {
+    signed = await readSignedWatcherPayload(request, transportSecrets);
+  } catch {
+    return unauthorized();
+  }
+  const event = String(signed.payload.event ?? '').trim();
+  if (!event) return jsonResponse({ ok: false, error: '缺少 event' }, 400);
+  // resolved=true 表示"恢复了"：清掉静默期，下次再出事能立刻提醒。
+  if (signed.payload.resolved === true) {
+    await clearAlert(env, event);
+    return jsonResponse({ ok: true, cleared: true });
+  }
+  const result = await emitAlert(env, {
+    event,
+    level: String(signed.payload.level ?? 'warning'),
+    title: String(signed.payload.title ?? 'EdgePay 告警'),
+    message: String(signed.payload.message ?? ''),
+  }, { secret: settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '') });
+  return jsonResponse({ ok: true, ...result });
+}
+
+/**
+ * 巡检 Watcher 掉线。
+ *
+ * 判据是"上报过、但已经超过存活窗口没再上报"——从没上报过的实例不算掉线，
+ * 否则没装 Watcher 的部署会一直收到告警。恢复上报时清掉静默期。
+ */
+async function checkWatcherLiveness(env, now = Date.now()) {
+  const stale = await staleWatcherInstances(env, now);
+  const secret = settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '');
+  for (const item of stale) {
+    const minutes = Math.round(item.silentMs / 60_000);
+    await emitAlert(env, {
+      event: `watcher_offline:${item.key}`,
+      level: 'critical',
+      title: 'EdgePay 监听器掉线',
+      message: `监听器已 ${minutes} 分钟没有上报。受影响的收款插件：${item.plugins.join('、') || '未知'}。`
+        + '这期间这些通道的到账可能不会被确认，请尽快检查容器是否还在运行。',
+    }, { secret, now });
+  }
+  const online = await onlineWatcherPlugins(env, now);
+  if (online.size) {
+    // 有实例活着就把它那条静默期清掉，下次掉线能立刻告警。
+    for (const item of stale) await clearAlert(env, `watcher_offline:${item.key}`).catch(() => {});
+  }
 }
 
 async function licenseAttestationApi(request, env) {
@@ -2982,6 +3091,7 @@ async function route(request, env, ctx) {
     return watcherDiscoveryReport(request, env, watcherDiscoveryMatch[1]);
   }
   if (pathname === '/api/watcher/bootstrap' && request.method === 'POST') return watcherBootstrap(request, env);
+  if (pathname === '/api/watcher/alert' && request.method === 'POST') return watcherAlertApi(request, env);
   if (pathname === '/internal/receipt-poll') return receiptPollTrigger(request, env, ctx);
   if (pathname === '/api/pay/' || pathname === '/api/pay') return new Response('not_found', { status: 404 });
   if ((pathname === '/api' || pathname === '/api.php')) return epayApi(request, env);
@@ -3021,6 +3131,8 @@ async function route(request, env, ctx) {
   if (pathname === '/admin/api/license' && request.method === 'GET') return licenseStatusApi(request, env);
   if (pathname === '/admin/api/version' && request.method === 'GET') return adminVersionApi(request, env);
   if (pathname === '/admin/api/site' && ['GET', 'PUT'].includes(request.method)) return siteConfigApi(request, env);
+  if (pathname === '/admin/api/alerts' && ['GET', 'PUT'].includes(request.method)) return alertConfigApi(request, env);
+  if (pathname === '/admin/api/alerts/test' && request.method === 'POST') return alertTestApi(request, env);
   if (pathname === '/admin/api/keys' && ['GET', 'POST'].includes(request.method)) return keyManagementApi(request, env);
   if (pathname === '/admin/api/channels' && ['GET', 'PUT'].includes(request.method)) return channelsApi(request, env);
   const adminChannelDeleteMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)$/u);
@@ -3035,7 +3147,7 @@ async function route(request, env, ctx) {
     if (!await isAdminSession(request, env)) return adminLoginRedirect(request);
     return Response.redirect(new URL('/admin/site', request.url), 303);
   }
-  if (/^\/admin\/(?:site|plugins|channels|orders|keys|docs)$/u.test(pathname)) {
+  if (/^\/admin\/(?:site|plugins|channels|alerts|orders|keys|docs)$/u.test(pathname)) {
     if (!await isAdminSession(request, env)) return adminLoginRedirect(request);
     return adminDashboard(request, env);
   }
@@ -3095,6 +3207,10 @@ export function createHandlers(runtime) {
         if (!await hasScheduledWork(env, runtime.registry)) return;
         const runtimeEnv = await prepare(env);
         await Promise.all([expireDuePayments(runtimeEnv), dispatchDueNotifications(runtimeEnv)]);
+        // 掉线巡检不该拖垮这一轮的正事，失败只记日志。
+        await checkWatcherLiveness(runtimeEnv).catch((error) => {
+          console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
+        });
         await runReceiptPoll(runtimeEnv, ctx, 'scheduled', true);
       })());
     },

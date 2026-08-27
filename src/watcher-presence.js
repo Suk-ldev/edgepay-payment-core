@@ -58,6 +58,37 @@ export async function recordWatcherPresence(env, key, capabilities, now = Date.n
 }
 
 /**
+ * 上报过、但已经超过存活窗口没再上报的实例。
+ *
+ * 判据必须是"上报过"：从没上报过的部署（根本没装 Watcher）不该被当成掉线，
+ * 否则没用监听器的人会一直收到告警。
+ *
+ * 行会在 PRESENCE_SWEEP_MS 之后被清掉，所以这里天然只看得到"最近才掉线"的那些；
+ * 掉线很久的实例不会永远刷告警。
+ */
+export async function staleWatcherInstances(env, now = Date.now()) {
+  const { results } = await env.DB.prepare(`
+    SELECT setting_key, value_text, updated_at FROM runtime_settings
+    WHERE setting_key = 'watcher_presence' OR setting_key LIKE ?
+  `).bind(`${PRESENCE_PREFIX}%`).all();
+  const stale = [];
+  for (const row of results ?? []) {
+    const updatedAt = Date.parse(String(row?.updated_at ?? ''));
+    if (!Number.isFinite(updatedAt)) continue;
+    const silentMs = now - updatedAt;
+    if (silentMs < PRESENCE_TTL_MS) continue;
+    let parsed;
+    try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
+    stale.push({
+      key: String(row.setting_key ?? '').replace(PRESENCE_PREFIX, ''),
+      plugins: Array.isArray(parsed?.plugins) ? parsed.plugins.map(String) : [],
+      silentMs,
+    });
+  }
+  return stale;
+}
+
+/**
  * 所有在线实例声明过的插件并集。
  *
  * 也读旧的单行 `watcher_presence`：升级后旧版 Watcher 还没重新上报的那一小段时间里
