@@ -240,10 +240,11 @@ function renderPlugins(plugins = pluginsState) {
   pluginsState = plugins;
   const keyword = pluginQuery.keyword.toLowerCase();
   const filtered = plugins.filter((plugin) => {
+    const payTypes = Array.isArray(plugin.payTypes) ? plugin.payTypes : [];
     const matchesKeyword = !keyword || [
       plugin.name,
       plugin.code,
-      ...(plugin.payTypes ?? []),
+      ...payTypes,
     ].some((value) => String(value).toLowerCase().includes(keyword));
     const matchesStatus = !pluginQuery.status
       || (pluginQuery.status === 'licensed' && plugin.licensed)
@@ -255,7 +256,7 @@ function renderPlugins(plugins = pluginsState) {
   });
   pluginBody.innerHTML = filtered.length ? filtered.map((plugin) => `<tr class="${plugin.licensed ? '' : 'ui-plugin-unlicensed'}">
     <td><strong>${text(plugin.name)}</strong><small>${text(plugin.code)}</small></td>
-    <td>${text(plugin.payTypes.join(' / '))}</td>
+    <td>${text((Array.isArray(plugin.payTypes) ? plugin.payTypes : []).join(' / ') || '购买后显示')}</td>
     <td>${text(modeName(plugin))}</td>
     <td>${plugin.licensed ? `
       <label class="ui-plugin-toggle">

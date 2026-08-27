@@ -2439,6 +2439,30 @@ function normalizedAdminField(field, value) {
   return textValue;
 }
 
+function catalogPluginRow(item, licensed = false) {
+  const code = String(item?.code ?? '').trim();
+  const name = String(item?.name ?? code).trim();
+  const catalogRuntime = String(item?.runtime ?? '').trim();
+  const runtime = catalogRuntime === 'both' ? 'hybrid' : (catalogRuntime === 'watcher' ? 'docker' : catalogRuntime);
+  return {
+    code,
+    name,
+    version: String(item?.version ?? item?.current_version ?? ''),
+    tier: String(item?.tier ?? 'PAID').trim() || 'PAID',
+    mode: '',
+    runtime,
+    payTypes: [],
+    required: [],
+    note: '购买并升级当前 Worker 后开放配置。',
+    docs: '',
+    configured: false,
+    enabled: false,
+    missingFields: [],
+    licensed,
+    installed: false,
+  };
+}
+
 async function pluginConfigApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method === 'GET') {
@@ -2452,9 +2476,17 @@ async function pluginConfigApi(request, env) {
     const pendingInstall = license.plugins
       .filter((code) => !registry.has(code))
       .map((code) => ({ code, name: license.pluginNames?.[code] ?? code }));
+    const results = publicPluginList(registry, config)
+      .map((plugin) => ({ ...plugin, licensed: licensed.has(plugin.code), installed: true }));
+    const resultCodes = new Set(results.map((plugin) => plugin.code));
+    for (const item of Array.isArray(license.catalog) ? license.catalog : []) {
+      const code = String(item?.code ?? '').trim();
+      if (!code || resultCodes.has(code) || licensed.has(code)) continue;
+      results.push(catalogPluginRow(item, false));
+      resultCodes.add(code);
+    }
     return jsonResponse({
-      results: publicPluginList(registry, config)
-        .map((plugin) => ({ ...plugin, licensed: licensed.has(plugin.code) })),
+      results,
       forms: adminPluginForms(registry, config)
         .filter((form) => licensed.has(form.code))
         .map((form) => ({ ...form, licensed: true })),

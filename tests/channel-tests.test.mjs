@@ -245,6 +245,48 @@ class MemoryDatabase {
   }
 }
 
+test('插件配置接口用授权目录展示未购买插件', async () => {
+  const unpaidWorker = createTestWorker({
+    license: {
+      async state(_env, registry) {
+        const freeCodes = registry.manifests()
+          .filter((manifest) => manifest.tier === 'FREE')
+          .map((manifest) => manifest.code);
+        return {
+          licensed: true,
+          domain: 'pay.example',
+          plugins: freeCodes,
+          catalog: [
+            { code: 'stripe_api', name: 'Stripe Checkout', runtime: 'worker', tier: 'PAID', version: '2.0.14' },
+          ],
+          entitlementVersion: 1,
+        };
+      },
+      async attest() { throw new Error('测试环境不做在线证明'); },
+      async grantEnvelope() { return null; },
+      async packageBaseUrl() { return 'https://license.example.com'; },
+    },
+  });
+  const env = {
+    ADMIN_TOKEN: 'test-admin-password',
+    ADMIN_USERNAME: 'admin',
+    CONFIG_ENCRYPTION_KEY: 'plugin-catalog-config-key',
+    DB: new MemoryDatabase(),
+  };
+  const cookie = (await createAdminSession(env)).split(';', 1)[0];
+  const response = await unpaidWorker.fetch(new Request('https://pay.example/admin/api/plugins', {
+    headers: { cookie },
+  }), env, { waitUntil() {} });
+  const payload = await response.json();
+  const stripe = payload.results.find((plugin) => plugin.code === 'stripe_api');
+
+  assert.equal(response.status, 200);
+  assert.equal(stripe?.licensed, false);
+  assert.equal(stripe?.installed, false);
+  assert.equal(stripe?.name, 'Stripe Checkout');
+  assert.equal(payload.forms.some((form) => form.code === 'stripe_api'), false);
+});
+
 test('后台 API 只在管理员主动提交后创建真实待支付测试单，并可读取记录', async () => {
   const configEncryptionKey = 'channel-test-config-key';
   const settings = new Map([
