@@ -10,13 +10,13 @@
  * 现在每个实例各写各的行，读的时候取并集。
  */
 
-const PRESENCE_PREFIX = 'watcher_presence:';
+export const PRESENCE_PREFIX = 'watcher_presence:';
 /** 超过这个时长没再上报就算离线。 */
-const PRESENCE_TTL_MS = 120_000;
+export const PRESENCE_TTL_MS = 120_000;
 /** 写入节流：内容没变且刚写过就不再写。 */
 const PRESENCE_THROTTLE_MS = 30_000;
 /** 早就离线的实例行没有保留价值，顺手清掉，避免键无限增长。 */
-const PRESENCE_SWEEP_MS = 600_000;
+export const PRESENCE_SWEEP_MS = 600_000;
 
 const encoder = new TextEncoder();
 
@@ -58,13 +58,14 @@ export async function recordWatcherPresence(env, key, capabilities, now = Date.n
 }
 
 /**
- * 上报过、但已经超过存活窗口没再上报的实例。
+ * 刚掉线的实例：上报过，停了超过存活窗口，但还没停到"早就不在了"。
  *
  * 判据必须是"上报过"：从没上报过的部署（根本没装 Watcher）不该被当成掉线，
  * 否则没用监听器的人会一直收到告警。
  *
- * 行会在 PRESENCE_SWEEP_MS 之后被清掉，所以这里天然只看得到"最近才掉线"的那些；
- * 掉线很久的实例不会永远刷告警。
+ * 上界同样重要。清扫只发生在有实例上报时，监听器一直不回来就没人清它那一行；
+ * 若不设上界，这一行会永远处于"刚掉线"状态，让 cron 每分钟都被唤醒去查一遍。
+ * 限定成一段窗口之后，告警在掉线那几分钟发出，之后系统重新安静下来。
  */
 export async function staleWatcherInstances(env, now = Date.now()) {
   const { results } = await env.DB.prepare(`
@@ -76,7 +77,7 @@ export async function staleWatcherInstances(env, now = Date.now()) {
     const updatedAt = Date.parse(String(row?.updated_at ?? ''));
     if (!Number.isFinite(updatedAt)) continue;
     const silentMs = now - updatedAt;
-    if (silentMs < PRESENCE_TTL_MS) continue;
+    if (silentMs < PRESENCE_TTL_MS || silentMs > PRESENCE_SWEEP_MS) continue;
     let parsed;
     try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
     stale.push({
@@ -112,4 +113,19 @@ export async function onlineWatcherPlugins(env, now = Date.now()) {
     }
   }
   return plugins;
+}
+
+/** 仍在存活窗口内的实例键。用于恢复后把它那条掉线静默期清掉。 */
+export async function liveWatcherInstances(env, now = Date.now()) {
+  const { results } = await env.DB.prepare(`
+    SELECT setting_key, updated_at FROM runtime_settings
+    WHERE setting_key = 'watcher_presence' OR setting_key LIKE ?
+  `).bind(`${PRESENCE_PREFIX}%`).all();
+  const live = [];
+  for (const row of results ?? []) {
+    const updatedAt = Date.parse(String(row?.updated_at ?? ''));
+    if (!Number.isFinite(updatedAt) || now - updatedAt >= PRESENCE_TTL_MS) continue;
+    live.push(String(row.setting_key ?? '').replace(PRESENCE_PREFIX, ''));
+  }
+  return live;
 }

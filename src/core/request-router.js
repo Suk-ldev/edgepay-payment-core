@@ -43,7 +43,10 @@ import {
 } from '../receipt-discovery.js';
 import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
-import { onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances } from '../watcher-presence.js';
+import {
+  PRESENCE_PREFIX, PRESENCE_SWEEP_MS, PRESENCE_TTL_MS,
+  liveWatcherInstances, onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances,
+} from '../watcher-presence.js';
 import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
 import { pluginContext } from './plugin-context.js';
 import { runtimeOf, withRuntime } from './runtime-env.js';
@@ -1495,11 +1498,9 @@ async function checkWatcherLiveness(env, now = Date.now()) {
         + '这期间对应通道的到账不会被确认。',
     }, { secret, now });
   }
-  const online = await onlineWatcherPlugins(env, now);
-  if (online.size) {
-    // 有实例活着就把它那条静默期清掉，下次掉线能立刻告警。
-    for (const item of stale) await clearAlert(env, `watcher_offline:${item.key}`).catch(() => {});
-  }
+  // 恢复销案：还在线的实例，把它上一次掉线的静默期清掉，下次再掉能立刻告警。
+  const live = await liveWatcherInstances(env, now);
+  for (const key of live) await clearAlert(env, `watcher_offline:${key}`).catch(() => {});
 }
 
 async function licenseAttestationApi(request, env) {
@@ -3172,20 +3173,35 @@ async function route(request, env, ctx) {
  * 就直接返回。判断条件必须和 receiptWatcherAccounts / dispatchDueNotifications
  * 各自的取数条件保持一致，宁可多算一次也不能漏掉活。
  */
-async function hasScheduledWork(env, registry) {
+/**
+ * 这一轮 cron 有没有事要做。
+ *
+ * 掉线检测也并在这条查询里。原来它跟在 hasScheduledWork 的闸门后面，于是"没有
+ * 待支付订单"就直接返回，巡检根本不会跑——而越是没单的时候，越需要知道监听器
+ * 已经掉了。并进来之后，空跑仍然只有这一次查询。
+ */
+async function scheduledWork(env, registry, now = Date.now()) {
   const maxGrace = Math.max(0, ...registry.manifests().map((manifest) => manifest.receiptGraceSeconds));
-  const graceCutoff = new Date(Date.now() - (maxGrace * 1_000)).toISOString();
+  const graceCutoff = new Date(now - (maxGrace * 1_000)).toISOString();
+  const offlineBefore = new Date(now - PRESENCE_TTL_MS).toISOString();
+  const forgetBefore = new Date(now - PRESENCE_SWEEP_MS).toISOString();
   const row = await env.DB.prepare(`
     SELECT
       (SELECT COUNT(*) FROM payment_attempts WHERE status IN ('PENDING', 'PAYING')) AS open_payments,
       (SELECT COUNT(*) FROM payment_attempts
         WHERE plugin_code = 'usdt_trc20_receipt' AND status = 'EXPIRED' AND expires_at > ?) AS grace_payments,
       (SELECT COUNT(*) FROM notification_tasks
-        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?) AS due_notifications
-  `).bind(graceCutoff, timestamp()).first();
-  return Number(row?.open_payments ?? 0)
-    + Number(row?.grace_payments ?? 0)
-    + Number(row?.due_notifications ?? 0) > 0;
+        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?) AS due_notifications,
+      (SELECT COUNT(*) FROM runtime_settings
+        WHERE (setting_key = 'watcher_presence' OR setting_key LIKE ?)
+          AND updated_at < ? AND updated_at > ?) AS silent_watchers
+  `).bind(graceCutoff, timestamp(), `${PRESENCE_PREFIX}%`, offlineBefore, forgetBefore).first();
+  return {
+    hasPaymentWork: Number(row?.open_payments ?? 0)
+      + Number(row?.grace_payments ?? 0)
+      + Number(row?.due_notifications ?? 0) > 0,
+    hasSilentWatcher: Number(row?.silent_watchers ?? 0) > 0,
+  };
 }
 
 export function createHandlers(runtime) {
@@ -3200,15 +3216,19 @@ export function createHandlers(runtime) {
     },
     async scheduled(_controller, env, ctx) {
       ctx.waitUntil((async () => {
-        // 先花一次计数查询问清楚有没有活；没有就到此为止，
+        // 先花一次计数查询问清楚有没有活；都没有就到此为止，
         // 后面那一整套（密钥解密、通道与插件配置、授权状态、两遍订单扫描）全省掉。
-        if (!await hasScheduledWork(env, runtime.registry)) return;
+        const work = await scheduledWork(env, runtime.registry);
+        if (!work.hasPaymentWork && !work.hasSilentWatcher) return;
         const runtimeEnv = await prepare(env);
-        await Promise.all([expireDuePayments(runtimeEnv), dispatchDueNotifications(runtimeEnv)]);
         // 掉线巡检不该拖垮这一轮的正事，失败只记日志。
-        await checkWatcherLiveness(runtimeEnv).catch((error) => {
-          console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
-        });
+        if (work.hasSilentWatcher) {
+          await checkWatcherLiveness(runtimeEnv).catch((error) => {
+            console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
+          });
+        }
+        if (!work.hasPaymentWork) return;
+        await Promise.all([expireDuePayments(runtimeEnv), dispatchDueNotifications(runtimeEnv)]);
         await runReceiptPoll(runtimeEnv, ctx, 'scheduled', true);
       })());
     },
