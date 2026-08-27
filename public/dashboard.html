@@ -255,57 +255,62 @@
       <section id="alerts" class="ui-section" hidden>
         <div class="ui-section-heading">
           <div><h2>渠道通知</h2></div>
-          <p>监听器掉线、微信收款掉登录这类"出事但没人知道"的情况，会推到这里配置的渠道。</p>
+          <p>监听器掉线和应用宝协议掉登录会推送到这里配置的渠道。同一事件在提醒间隔内只推送一次。</p>
         </div>
-        <form id="alert-form" class="ui-config-form">
-          <div class="ui-field">
-            <label for="alert-enabled">启用推送</label>
-            <select id="alert-enabled" name="enabled">
-              <option value="off">关闭</option>
-              <option value="on">开启</option>
-            </select>
-            <p class="ui-hint">关闭时所有告警只写日志，不外发。</p>
-          </div>
-          <div class="ui-field">
-            <label for="alert-provider">推送渠道</label>
-            <select id="alert-provider" name="provider">
-              <option value="">请选择</option>
-              <option value="serverchan">Server酱</option>
-              <option value="pushplus">PushPlus</option>
-              <option value="wecom">企业微信机器人</option>
-              <option value="webhook">自定义 Webhook</option>
-            </select>
-          </div>
-          <div class="ui-field" data-alert-field="token">
-            <label for="alert-token">Token</label>
-            <input id="alert-token" name="token" type="password" autocomplete="off" placeholder="留空保留原值">
-            <p class="ui-hint">Server酱填 SendKey，PushPlus 填 token。保存后不再回显，留空即保留原值。</p>
-          </div>
-          <div class="ui-field" data-alert-field="url">
-            <label for="alert-url">Webhook 地址</label>
-            <input id="alert-url" name="url" type="url" autocomplete="off" placeholder="https://">
-            <p class="ui-hint">必须是 https：推送内容里带订单和账号信息，明文出网没有理由。</p>
-          </div>
-          <div class="ui-field">
-            <label for="alert-interval">同一事件的提醒间隔（秒）</label>
-            <input id="alert-interval" name="min_interval_seconds" type="number" min="60" max="86400" step="60" value="600">
-            <p class="ui-hint">掉线是持续状态，每分钟推一条只会让人把通知静音。发送失败不计入间隔，下一轮还会重试。</p>
+        <form id="alert-form" class="ui-config-editor">
+          <div class="ui-config-grid">
+            <label class="ui-config-field" for="alert-enabled">
+              <span>启用推送</span>
+              <select id="alert-enabled" name="enabled">
+                <option value="off">关闭</option>
+                <option value="on">开启</option>
+              </select>
+              <small>关闭后告警只写日志。</small>
+            </label>
+            <label class="ui-config-field" for="alert-provider">
+              <span>推送渠道</span>
+              <select id="alert-provider" name="provider">
+                <option value="">请选择</option>
+                <option value="serverchan">Server酱</option>
+                <option value="pushplus">PushPlus</option>
+                <option value="wecom">企业微信机器人</option>
+                <option value="webhook">自定义 Webhook</option>
+              </select>
+            </label>
+            <label class="ui-config-field" data-alert-field="token" for="alert-token">
+              <span>Token</span>
+              <input id="alert-token" name="token" type="password" autocomplete="off" placeholder="留空保留原值" />
+              <small>Server酱填 SendKey，PushPlus 填 token。留空保留原值。</small>
+            </label>
+            <label class="ui-config-field" data-alert-field="url" for="alert-url">
+              <span>Webhook 地址</span>
+              <input id="alert-url" name="url" type="url" autocomplete="off" placeholder="https://" />
+              <small>必须是 https。</small>
+            </label>
+            <label class="ui-config-field" for="alert-interval">
+              <span>提醒间隔（秒）</span>
+              <input id="alert-interval" name="min_interval_seconds" type="number" min="60" max="86400" step="60" value="600" />
+              <small>60 到 86400 之间。发送失败不计入间隔。</small>
+            </label>
           </div>
           <div class="ui-config-actions">
-            <span id="alert-save-note">保存后可用"发送测试"验证一次真实投递。</span>
+            <span id="alert-save-note">发送测试会先保存当前设置。</span>
             <button id="alert-test" class="ui-secondary-action" type="button">发送测试</button>
             <button type="submit">保存通知设置</button>
           </div>
         </form>
-        <div class="ui-section-heading"><div><h3>会触发通知的事件</h3></div></div>
+        <div class="ui-section-heading">
+          <div><h2>事件</h2></div>
+          <p>自定义 Webhook 可按 <code>event</code> 字段分流。</p>
+        </div>
         <div class="ui-key-grid">
           <article class="ui-key-card">
-            <header><div><h3>监听器掉线</h3><p>Docker Watcher 或收款桥接器超过存活窗口没有上报。</p></div></header>
-            <dl><div><dt>级别</dt><dd>critical</dd></div><div><dt>事件名</dt><dd><code>watcher_offline:*</code></dd></div></dl>
+            <header><div><h3>监听器掉线</h3><p>Docker Watcher 或应用宝协议监听超过存活窗口没有上报。</p></div><span class="ui-key-state">critical</span></header>
+            <dl><div><dt>事件名</dt><dd><code>watcher_offline:*</code></dd></div><div><dt>恢复</dt><dd>重新上报后自动销案</dd></div></dl>
           </article>
           <article class="ui-key-card">
-            <header><div><h3>微信收款掉登录</h3><p>个人收款监听的微信登录态失效，到账将不再被确认。</p></div></header>
-            <dl><div><dt>级别</dt><dd>critical</dd></div><div><dt>事件名</dt><dd><code>wechat_login_expired</code></dd></div></dl>
+            <header><div><h3>应用宝协议掉登录</h3><p>协议监听的登录态失效，到账不再被确认。</p></div><span class="ui-key-state">critical</span></header>
+            <dl><div><dt>事件名</dt><dd><code>yyb_login_expired</code></dd></div><div><dt>恢复</dt><dd>重新扫码后自动销案</dd></div></dl>
           </article>
         </div>
       </section>

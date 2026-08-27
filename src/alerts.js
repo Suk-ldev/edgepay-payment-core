@@ -59,6 +59,20 @@ export function normalizeAlertConfig(input) {
   };
 }
 
+/**
+ * 把后台提交的配置合进现有配置。
+ *
+ * 留空的 token 表示"不改"。合并必须发生在校验**之前**——反过来的话，token
+ * 已配置、这次留空提交，会先被"该渠道需要填写 token"挡下来，而输入框上明明
+ * 写着"留空保留原值"。
+ */
+export function mergeAlertConfig(current, submitted) {
+  return normalizeAlertConfig({
+    ...(submitted && typeof submitted === 'object' ? submitted : {}),
+    token: String(submitted?.token ?? '').trim() || String(current?.token ?? ''),
+  });
+}
+
 /** 后台展示用：不回传 token 明文，只说配没配。 */
 export function publicAlertConfig(config) {
   return {

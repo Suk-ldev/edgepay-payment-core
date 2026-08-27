@@ -44,7 +44,7 @@ import {
 import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
 import { onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances } from '../watcher-presence.js';
-import { emitAlert, clearAlert, normalizeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
+import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
 import { pluginContext } from './plugin-context.js';
 import { runtimeOf, withRuntime } from './runtime-env.js';
 import {
@@ -1412,9 +1412,7 @@ async function alertConfigApi(request, env) {
   try {
     assertAdminMutationRequest(request);
     const body = await adminJsonBody(request);
-    const next = normalizeAlertConfig(body);
-    // 留空表示"不改"，否则每次保存都得把 token 重新粘一遍。
-    if (!next.token) next.token = (await readAlertConfig(env, secret)).token;
+    const next = mergeAlertConfig(await readAlertConfig(env, secret), body);
     await writeAlertConfig(env, secret, next);
     return jsonResponse({ ok: true, config: publicAlertConfig(next) });
   } catch (error) {
@@ -1493,8 +1491,8 @@ async function checkWatcherLiveness(env, now = Date.now()) {
       event: `watcher_offline:${item.key}`,
       level: 'critical',
       title: 'EdgePay 监听器掉线',
-      message: `监听器已 ${minutes} 分钟没有上报。受影响的收款插件：${item.plugins.join('、') || '未知'}。`
-        + '这期间这些通道的到账可能不会被确认，请尽快检查容器是否还在运行。',
+      message: `监听器已 ${minutes} 分钟没有上报，受影响的插件：${item.plugins.join('、') || '未知'}。`
+        + '这期间对应通道的到账不会被确认。',
     }, { secret, now });
   }
   const online = await onlineWatcherPlugins(env, now);
