@@ -52,6 +52,11 @@ import {
 // 插件要额外带给 Watcher / 轮询器的收款信息统一放在订单 metadata 的这个键下。
 const WATCHER_RECEIPT_KEY = 'receipt_watcher';
 const RECEIPT_DISCOVERY_PREFIX = 'receipt_discovery:';
+const PLUGIN_LIST_CACHE_MILLISECONDS = 60_000;
+const PLUGIN_LIST_FAILURE_CACHE_MILLISECONDS = 5_000;
+// 管理台插件页会同时读取并解密配置、读取授权状态、合并公开目录。结果按当前运行时
+// 缓存在 isolate 内，既不把含配置值的响应放进共享 HTTP 缓存，也能合并并发冷请求。
+const pluginListCache = new WeakMap();
 
 /** 按编码取插件；不存在（没买或没打进这次构建）就报错。 */
 function pluginOf(env, code) {
@@ -2463,38 +2468,76 @@ function catalogPluginRow(item, licensed = false) {
   };
 }
 
+async function pluginConfigPayload(env) {
+  const runtime = runtimeOf(env);
+  const { registry } = runtime;
+  const [config, license] = await Promise.all([
+    runtimePluginConfig(env), runtime.license.state(env, registry),
+  ]);
+  const licensed = new Set(license.plugins);
+  // 已购但没装进这次构建的插件：按权益出货后，新买的插件要去 Deploy 站升级一次才会进包。
+  const pendingInstall = license.plugins
+    .filter((code) => !registry.has(code))
+    .map((code) => ({ code, name: license.pluginNames?.[code] ?? code }));
+  const results = publicPluginList(registry, config)
+    .map((plugin) => ({ ...plugin, licensed: licensed.has(plugin.code), installed: true }));
+  const resultCodes = new Set(results.map((plugin) => plugin.code));
+  for (const item of Array.isArray(license.catalog) ? license.catalog : []) {
+    const code = String(item?.code ?? '').trim();
+    if (!code || resultCodes.has(code) || licensed.has(code)) continue;
+    results.push(catalogPluginRow(item, false));
+    resultCodes.add(code);
+  }
+  return {
+    results,
+    forms: adminPluginForms(registry, config)
+      .filter((form) => licensed.has(form.code))
+      .map((form) => ({ ...form, licensed: true })),
+    storage: 'D1 AES-GCM / CONFIG_ENCRYPTION_KEY',
+    license,
+    pending_install: pendingInstall,
+    upgrade_url: license.upgradeUrl ?? '',
+  };
+}
+
+async function cachedPluginConfigPayload(env) {
+  const runtime = runtimeOf(env);
+  const now = Date.now();
+  const cached = pluginListCache.get(runtime);
+  if (cached?.expiresAt > now) {
+    return { payload: await cached.promise, cacheStatus: 'HIT' };
+  }
+
+  const entry = {
+    expiresAt: now + PLUGIN_LIST_CACHE_MILLISECONDS,
+    promise: pluginConfigPayload(env),
+  };
+  pluginListCache.set(runtime, entry);
+  try {
+    const payload = await entry.promise;
+    // 授权服务故障的降级结果只短暂缓存，避免恢复后仍长时间显示“未购买”。
+    const ttl = payload.license?.retryable
+      ? PLUGIN_LIST_FAILURE_CACHE_MILLISECONDS
+      : PLUGIN_LIST_CACHE_MILLISECONDS;
+    if (pluginListCache.get(runtime) === entry) entry.expiresAt = Date.now() + ttl;
+    return { payload, cacheStatus: 'MISS' };
+  } catch (error) {
+    if (pluginListCache.get(runtime) === entry) pluginListCache.delete(runtime);
+    throw error;
+  }
+}
+
+function invalidatePluginListCache(env) {
+  pluginListCache.delete(runtimeOf(env));
+}
+
 async function pluginConfigApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method === 'GET') {
-    const runtime = runtimeOf(env);
-    const { registry } = runtime;
-    const [config, license] = await Promise.all([
-      runtimePluginConfig(env), runtime.license.state(env, registry),
-    ]);
-    const licensed = new Set(license.plugins);
-    // 已购但没装进这次构建的插件：按权益出货后，新买的插件要去 Deploy 站升级一次才会进包。
-    const pendingInstall = license.plugins
-      .filter((code) => !registry.has(code))
-      .map((code) => ({ code, name: license.pluginNames?.[code] ?? code }));
-    const results = publicPluginList(registry, config)
-      .map((plugin) => ({ ...plugin, licensed: licensed.has(plugin.code), installed: true }));
-    const resultCodes = new Set(results.map((plugin) => plugin.code));
-    for (const item of Array.isArray(license.catalog) ? license.catalog : []) {
-      const code = String(item?.code ?? '').trim();
-      if (!code || resultCodes.has(code) || licensed.has(code)) continue;
-      results.push(catalogPluginRow(item, false));
-      resultCodes.add(code);
-    }
-    return jsonResponse({
-      results,
-      forms: adminPluginForms(registry, config)
-        .filter((form) => licensed.has(form.code))
-        .map((form) => ({ ...form, licensed: true })),
-      storage: 'D1 AES-GCM / CONFIG_ENCRYPTION_KEY',
-      license,
-      pending_install: pendingInstall,
-      upgrade_url: license.upgradeUrl ?? '',
-    });
+    const { payload, cacheStatus } = await cachedPluginConfigPayload(env);
+    const response = jsonResponse(payload);
+    response.headers.set('x-edgepay-cache', cacheStatus);
+    return response;
   }
   if (request.method !== 'PUT') return new Response('method_not_allowed', { status: 405 });
   try {
@@ -2530,6 +2573,7 @@ async function pluginConfigApi(request, env) {
       throw new Error(`已启用插件不能缺少配置：${missingFields.join('、')}`);
     }
     await writeEncryptedJsonSetting(env, 'plugin_config', settingsEncryptionSecret(env), config);
+    invalidatePluginListCache(env);
     return jsonResponse({
       ok: true,
       form: adminPluginForms(registry, config).find((form) => form.code === plugin.manifest.code),

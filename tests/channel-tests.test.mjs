@@ -246,9 +246,11 @@ class MemoryDatabase {
 }
 
 test('插件配置接口用授权目录展示未购买插件', async () => {
+  let licenseStateCalls = 0;
   const unpaidWorker = createTestWorker({
     license: {
       async state(_env, registry) {
+        licenseStateCalls += 1;
         const freeCodes = registry.manifests()
           .filter((manifest) => manifest.tier === 'FREE')
           .map((manifest) => manifest.code);
@@ -281,10 +283,37 @@ test('插件配置接口用授权目录展示未购买插件', async () => {
   const stripe = payload.results.find((plugin) => plugin.code === 'stripe_api');
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get('x-edgepay-cache'), 'MISS');
   assert.equal(stripe?.licensed, false);
   assert.equal(stripe?.installed, false);
   assert.equal(stripe?.name, 'Stripe Checkout');
   assert.equal(payload.forms.some((form) => form.code === 'stripe_api'), false);
+
+  const cachedResponse = await unpaidWorker.fetch(new Request('https://pay.example/admin/api/plugins', {
+    headers: { cookie },
+  }), env, { waitUntil() {} });
+  assert.equal(cachedResponse.status, 200);
+  assert.equal(cachedResponse.headers.get('x-edgepay-cache'), 'HIT');
+  assert.equal(licenseStateCalls, 1, '缓存命中时不应重新读取授权与组装插件目录');
+
+  const updateResponse = await unpaidWorker.fetch(new Request('https://pay.example/admin/api/plugins', {
+    method: 'PUT',
+    headers: {
+      cookie,
+      origin: 'https://pay.example',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ plugin_code: 'fubei_receipt', enabled: false }),
+  }), env, { waitUntil() {} });
+  assert.equal(updateResponse.status, 200);
+  assert.equal(licenseStateCalls, 2, '保存插件配置时应重新校验当前授权');
+
+  const refreshedResponse = await unpaidWorker.fetch(new Request('https://pay.example/admin/api/plugins', {
+    headers: { cookie },
+  }), env, { waitUntil() {} });
+  assert.equal(refreshedResponse.status, 200);
+  assert.equal(refreshedResponse.headers.get('x-edgepay-cache'), 'MISS');
+  assert.equal(licenseStateCalls, 3, '保存插件配置后必须立即失效列表缓存');
 });
 
 test('后台 API 只在管理员主动提交后创建真实待支付测试单，并可读取记录', async () => {
