@@ -207,7 +207,11 @@ test('在线 Docker 接管后轮询响应明确标记已委派', () => {
 test('Docker 快照上报插件能力，在线时优先于 Worker 原生轮询', async () => {
   const worker = await readFile(new URL('../src/core/request-router.js', import.meta.url), 'utf8');
   assert.match(worker, /x-edgepay-watcher-plugins/u);
-  assert.match(worker, /setting_key = 'watcher_presence'/u);
+  // 在线状态的读写已经搬到 watcher-presence.js（每实例一行 + 取并集），
+  // 这里只确认路由仍然经由它记录，具体行为由 watcher-presence.test.mjs 覆盖。
+  assert.match(worker, /recordWatcherPresence\(/u);
+  const presence = await readFile(new URL('../src/watcher-presence.js', import.meta.url), 'utf8');
+  assert.match(presence, /watcher_presence/u);
   assert.match(worker, /delegated: 'docker_watcher'/u);
   assert.match(worker, /request\.method === 'GET' \? 'external_get' : 'signed_post',\s*true,/u);
 });

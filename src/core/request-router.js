@@ -43,6 +43,7 @@ import {
 } from '../receipt-discovery.js';
 import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
+import { onlineWatcherPlugins, presenceKey, recordWatcherPresence } from '../watcher-presence.js';
 import { pluginContext } from './plugin-context.js';
 import { runtimeOf, withRuntime } from './runtime-env.js';
 import {
@@ -1280,17 +1281,13 @@ async function watcherSnapshot(request, env) {
     .split(',')
     .map((value) => value.trim())
     .filter((value) => knownCodes.has(value)))].sort();
-  const presenceValue = JSON.stringify({ plugins: capabilities });
-  const presenceUpdatedAt = timestamp();
-  const presenceThrottle = new Date(Date.now() - 30_000).toISOString();
-  await env.DB.prepare(`
-    INSERT INTO runtime_settings (setting_key, value_text, updated_at)
-    VALUES ('watcher_presence', ?, ?)
-    ON CONFLICT(setting_key) DO UPDATE SET
-      value_text = excluded.value_text,
-      updated_at = excluded.updated_at
-    WHERE runtime_settings.updated_at <= ? OR runtime_settings.value_text <> ?
-  `).bind(presenceValue, presenceUpdatedAt, presenceThrottle, presenceValue).run();
+  // 每个 Watcher 实例各写各的行，读的时候取并集：同时跑两个 Watcher 时
+  // 不会再互相把对方声明的插件冲掉。详见 watcher-presence.js。
+  await recordWatcherPresence(
+    env,
+    await presenceKey(request.headers.get('x-edgepay-watcher-instance'), capabilities),
+    capabilities,
+  );
   const supported = new Set(capabilities);
   const [accounts, discoveries] = await Promise.all([
     receiptWatcherAccounts(env).then((items) => items.filter((account) => supported.has(account.plugin_code))),
@@ -1339,18 +1336,6 @@ async function watcherDiscoveryReport(request, env, requestId) {
   } catch (error) {
     return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
   }
-}
-
-async function onlineWatcherPlugins(env, now = Date.now()) {
-  const row = await env.DB.prepare(`
-    SELECT value_text, updated_at
-    FROM runtime_settings
-    WHERE setting_key = 'watcher_presence'
-    LIMIT 1
-  `).first();
-  if (!row || Date.parse(String(row.updated_at ?? '')) < now - 120_000) return new Set();
-  const parsed = parseJson(String(row.value_text ?? ''));
-  return new Set(Array.isArray(parsed.plugins) ? parsed.plugins.map(String) : []);
 }
 
 async function watcherBootstrap(request, env) {
