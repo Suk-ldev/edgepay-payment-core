@@ -2,6 +2,9 @@ const encoder = new TextEncoder();
 
 export const PERSONAL_RECEIPT_KEY = 'personal_receipt';
 
+// 监听端定时心跳/探活消息的正文。命中则按连通性探测处理，不进入金额匹配。
+export const RECEIPT_PROBE_MESSAGE_RE = /^(连通性探测|连通测试|通知测试|测试通知|心跳测试|heartbeat)$/iu;
+
 function bytesToBase64(bytes) {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -287,6 +290,12 @@ export async function parseSmsForwarder(input, config, nowSeconds = Date.now() /
   }
   const title = String(content.title);
   const message = String(content.msg);
+  // 监听工具（mpay / SmsForwarder 等）会定时投送一条“连通性探测”心跳，只有标题没有金额。
+  // 它已经通过验签和来源校验，这里直接当探活成功返回，避免被后面的金额解析判成 422，
+  // 导致监听端一直提示“心跳失败”。真实收款通知带金额，不会命中这里。
+  if (RECEIPT_PROBE_MESSAGE_RE.test(message.trim())) {
+    return { probe: true, paidAt: seconds, content, platform: isAlipay ? 'alipay' : 'wechat' };
+  }
   if (!isAlipay && !['微信支付', '微信收款助手', '微信收款商业版'].includes(title)) {
     throw new Error('未支持的微信通知标题');
   }

@@ -116,6 +116,30 @@ test('SmsForwarder 保持原 timestamp 换行 secret 的 HMAC 和微信通知解
   assert.equal(parsed.amountFen, 1_001);
   assert.equal(parsed.remarkCode, '2048');
 });
+test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功返回', async () => {
+  const secret = 'sms-test-secret';
+  const timestamp = 1_800_000_000_000;
+  const input = {
+    timestamp: String(timestamp),
+    sign: await hmacSha256Base64(secret, `${timestamp}\n${secret}`),
+    from: 'com.tencent.mm',
+    content: JSON.stringify({ title: '微信收款助手', msg: '连通性探测' }),
+  };
+  const parsed = await parseSmsForwarder(input, {
+    sms_forwarder_secret: secret,
+    sms_forwarder_time_tolerance: 300,
+  }, timestamp / 1_000);
+  assert.equal(parsed.probe, true);
+  assert.equal(parsed.amountFen, undefined);
+  // 探测消息签名不对时仍要按验签失败拒绝，不能放行。
+  await assert.rejects(
+    () => parseSmsForwarder({ ...input, sign: 'wrong' }, {
+      sms_forwarder_secret: secret,
+      sms_forwarder_time_tolerance: 300,
+    }, timestamp / 1_000),
+    /签名校验失败/u,
+  );
+});
 test('支付宝个人收款使用 SmsForwarder 自监听并解析标题金额', async () => {
   const secret = 'alipay-sms-secret';
   const timestamp = 1_800_000_000_000;

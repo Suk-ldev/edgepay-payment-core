@@ -1728,6 +1728,27 @@ async function smsForwarderChannelNotify(request, env, ctx, channel, plugin, plu
     const input = await readEpayPayload(request);
     const platform = plugin.manifest.payTypes.includes('alipay') ? 'alipay' : 'wechat';
     const signal = await parseSmsForwarder(input, pluginConfig, Date.now() / 1_000, platform);
+    // 监听端的连通性探测心跳：已验签、无金额，直接回成功，别当成一次真实到账去匹配订单。
+    // legacy=1 时回纯文本 "200"，兼容以正文判断成败的监听工具（mpay 等）。
+    if (signal.probe) {
+      if (new URL(request.url).searchParams.get('legacy') === '1') {
+        return new Response('200', {
+          status: 200,
+          headers: {
+            'content-type': 'text/plain; charset=utf-8',
+            'cache-control': 'no-store',
+            'x-edgepay-delivery-status': 'ready',
+          },
+        });
+      }
+      return smsForwarderNotifyResponse(request, channel, {
+        ok: true,
+        accepted: true,
+        confirmed: false,
+        status: 'ready',
+        message: `${plugin.manifest.name}通知入口可用；此消息是监听工具的连通性探测，不代表某次收款已到账。`,
+      }, 200);
+    }
     const digest = await crypto.subtle.digest(
       'SHA-256',
       new TextEncoder().encode(`${input.from ?? ''}|${input.timestamp ?? ''}|${input.content ?? ''}`),
