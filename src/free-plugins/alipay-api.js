@@ -18,6 +18,7 @@ export const alipayApiPlugin = definePlugin({
     mode: 'direct',
     runtime: 'direct',
     payTypes: ['alipay'],
+    verifyCallbackAmount: true,
     required: ['app_id', 'private_key', 'alipay_public_key'],
     adminFields: [
       { key: 'mode', label: '加签模式', type: 'select', options: [['key', '密钥模式'], ['cert', '证书模式']] },

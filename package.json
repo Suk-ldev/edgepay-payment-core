@@ -8,6 +8,7 @@
     ".": "./src/index.js",
     "./plugin-api": "./src/plugin-api.js",
     "./admin-fields": "./src/admin-fields.js",
+    "./body-limits": "./src/body-limits.js",
     "./poller-runtime": "./src/core/poller-runtime.js",
     "./runtime-settings": "./src/runtime-settings.js",
     "./plugin-config": "./src/core/plugin-config.js",

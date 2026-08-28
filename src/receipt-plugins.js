@@ -1,3 +1,5 @@
+import { PROVIDER_CALLBACK_MAX_BYTES, readBoundedText } from './body-limits.js';
+
 const encoder = new TextEncoder();
 
 export const PERSONAL_RECEIPT_KEY = 'personal_receipt';
@@ -37,6 +39,28 @@ export async function hmacSha256Base64(secret, content) {
     ['sign'],
   );
   return bytesToBase64(new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(String(content)))));
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(value)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export async function smsForwarderSignContent({
+  timestamp,
+  method = 'POST',
+  path = '',
+  from = '',
+  content = '',
+}) {
+  return [
+    'EDGE_SMS_FORWARDER_V2',
+    String(timestamp),
+    String(method).toUpperCase(),
+    String(path),
+    String(from),
+    await sha256Hex(content),
+  ].join('\n');
 }
 
 export function decimalToInteger(value, scale) {
@@ -157,7 +181,7 @@ export function selectPersonalReceipt(payments, record) {
 }
 
 export async function readSignedWatcherPayload(request, secret, nowSeconds = Date.now() / 1_000) {
-  const raw = await request.text();
+  const raw = await readBoundedText(request, PROVIDER_CALLBACK_MAX_BYTES, '监听器通知请求体');
   const timestamp = String(request.headers.get('x-watcher-timestamp') ?? '').trim();
   const signature = String(request.headers.get('x-watcher-signature') ?? '').trim();
   const seconds = Number(timestamp);
@@ -246,6 +270,16 @@ export function classifySmsForwarderDeliveryError(error) {
       message: '通知已接收，但订单状态已经发生变化。',
     };
   }
+  if (Number(error?.status) === 413 || rawMessage.includes('超过')) {
+    return {
+      httpStatus: 413,
+      ok: false,
+      accepted: false,
+      confirmed: false,
+      status: 'payload_too_large',
+      message: '投送失败：请求体超过允许大小。',
+    };
+  }
   if (
     error instanceof SyntaxError
     || /通知内容|非微信通知来源|未支持的微信通知标题|收款金额|请求体格式|流水支付时间|流水金额|JSON/iu.test(rawMessage)
@@ -269,20 +303,31 @@ export function classifySmsForwarderDeliveryError(error) {
   };
 }
 
-export async function parseSmsForwarder(input, config, nowSeconds = Date.now() / 1_000, platform = 'wechat') {
+export async function parseSmsForwarder(input, config, nowSeconds = Date.now() / 1_000, platform = 'wechat', requestContext = {}) {
   const timestamp = String(input?.timestamp ?? '');
   const sign = decodeURIComponent(String(input?.sign ?? ''));
   const secret = String(config?.sms_forwarder_secret ?? '');
   const tolerance = Math.max(30, Number(config?.sms_forwarder_time_tolerance ?? 300));
   const seconds = Math.floor(Number(timestamp) / 1_000);
+  const method = String(requestContext?.method ?? '').trim().toUpperCase();
+  const path = String(requestContext?.path ?? '').trim();
+  const from = String(input?.from ?? '').trim();
   if (!timestamp || !sign || !secret || !seconds || Math.abs(nowSeconds - seconds) > tolerance) {
     throw new Error('SmsForwarder 通知签名参数不完整或已失效');
   }
-  const expected = await hmacSha256Base64(secret, `${timestamp}\n${secret}`);
+  if (!method || !path) throw new Error('SmsForwarder 通知签名上下文不完整');
+  if (!from) throw new Error('SmsForwarder 通知来源不能为空');
+  const expected = `v2=${await hmacSha256Base64(secret, await smsForwarderSignContent({
+    timestamp,
+    method,
+    path,
+    from,
+    content: String(input?.content ?? ''),
+  }))}`;
   if (!timingSafeTextEqual(expected, sign)) throw new Error('SmsForwarder 通知签名校验失败');
   const isAlipay = platform === 'alipay';
   const expectedPackage = isAlipay ? 'com.eg.android.AlipayGphone' : 'com.tencent.mm';
-  if (input.from && input.from !== expectedPackage) throw new Error(`非${isAlipay ? '支付宝' : '微信'}通知来源`);
+  if (from !== expectedPackage) throw new Error(`非${isAlipay ? '支付宝' : '微信'}通知来源`);
   let content;
   try { content = JSON.parse(String(input.content ?? '')); } catch { throw new Error('SmsForwarder 通知内容格式不合法'); }
   if (!content || typeof content !== 'object' || !String(content.title ?? '').trim() || !String(content.msg ?? '').trim()) {

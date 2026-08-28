@@ -10,6 +10,9 @@ import {
   channelById, channelExpireMinutes, parseChannels, resolveChannel,
 } from '../channels.js';
 import { adminCaptchaResponse, clearAdminSession, createAdminSession, isAdminSession, verifyAdminLogin } from '../admin-auth.js';
+import {
+  EPAY_PAYLOAD_MAX_BYTES, PROVIDER_CALLBACK_MAX_BYTES, readBoundedJson, readBoundedText,
+} from '../body-limits.js';
 import { dispatchDueNotifications, enqueuePaymentNotification } from '../notifications.js';
 import { jsonResponse } from '../security.js';
 import {
@@ -92,6 +95,10 @@ const timestamp = () => new Date().toISOString();
 const OAUTH_STATE_SECONDS = 10 * 60;
 const utf8Encoder = new TextEncoder();
 function unauthorized() { return jsonResponse({ error: 'unauthorized' }, 401); }
+function errorHttpStatus(error, fallback = 400) {
+  const status = Number(error?.status);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : fallback;
+}
 
 function base64UrlEncode(value) {
   let binary = '';
@@ -856,13 +863,16 @@ async function epaySubmit(request, env) {
       );
     return Response.redirect(payUrl, 302);
   } catch (error) {
-    return new Response(`ePay V1 提交失败：${String(error.message ?? error)}`, { status: 400, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    return new Response(`ePay V1 提交失败：${String(error.message ?? error)}`, {
+      status: Number(error.status) || 400,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+    });
   }
 }
 
 async function epayMapi(request, env) {
   try { return mapiResponse(request, await createEpayAttempt(request, env, await readEpayPayload(request), true)); }
-  catch (error) { return jsonResponse({ code: 0, msg: String(error.message ?? error) }); }
+  catch (error) { return jsonResponse({ code: 0, msg: String(error.message ?? error) }, Number(error.status) || 200); }
 }
 
 function assertEpayApiAccess(input, env) {
@@ -912,7 +922,7 @@ async function epayApi(request, env) {
       return jsonResponse({ code: 1, msg: '退款成功', ...refund });
     }
     throw new Error('act 参数不支持');
-  } catch (error) { return jsonResponse({ code: 0, msg: String(error.message ?? error) }); }
+  } catch (error) { return jsonResponse({ code: 0, msg: String(error.message ?? error) }, Number(error.status) || 200); }
 }
 
 function digestHex(buffer) { return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join(''); }
@@ -990,6 +1000,7 @@ async function applyProviderResult(env, ctx, plugin, result) {
   const notifiedAmountFen = Number(result.amountFen);
   if (
     plugin.manifest.verifyCallbackAmount
+    && result.status === 'success'
     && (
       !Number.isSafeInteger(notifiedAmountFen)
       || notifiedAmountFen <= 0
@@ -1081,7 +1092,7 @@ async function applyProviderResult(env, ctx, plugin, result) {
 
 async function providerCallbackSnapshot(request, plugin) {
   const contentType = String(request.headers.get('content-type') ?? '').toLowerCase();
-  const raw = await request.clone().text();
+  const raw = await readBoundedText(request.clone(), PROVIDER_CALLBACK_MAX_BYTES, '渠道回调请求体');
   let payload = {};
   try {
     if (plugin.manifest.callbackFormat === 'xml' || contentType.includes('xml')) {
@@ -1366,7 +1377,7 @@ async function watcherDiscoveryReport(request, env, requestId) {
     await writePlainJsonSetting(env, key, next);
     return jsonResponse({ ok: true, status: next.status });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -1447,7 +1458,7 @@ async function alertConfigApi(request, env) {
     await writeAlertConfig(env, secret, next);
     return jsonResponse({ ok: true, config: publicAlertConfig(next) });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -1470,7 +1481,7 @@ async function alertTestApi(request, env) {
     });
     return jsonResponse(result.ok ? { ok: true } : { ok: false, error: result.error }, result.ok ? 200 : 502);
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -1598,8 +1609,8 @@ async function checkWatcherLiveness(env, now = Date.now()) {
 
 async function licenseAttestationApi(request, env) {
   let input;
-  try { input = await request.json(); } catch {
-    return jsonResponse({ error: '在线证明请求不是合法 JSON' }, 400);
+  try { input = await readBoundedJson(request, EPAY_PAYLOAD_MAX_BYTES, '在线证明请求体'); } catch (error) {
+    return jsonResponse({ error: String(error.message ?? '在线证明请求不是合法 JSON') }, Number(error.status) || 400);
   }
   try { return jsonResponse(await runtimeOf(env).license.attest(env, input)); }
   catch (error) { return jsonResponse({ error: String(error?.message ?? error) }, Number(error?.status) || 400); }
@@ -1913,7 +1924,10 @@ async function smsForwarderChannelNotify(request, env, ctx, channel, plugin, plu
   try {
     const input = await readEpayPayload(request);
     const platform = plugin.manifest.payTypes.includes('alipay') ? 'alipay' : 'wechat';
-    const signal = await parseSmsForwarder(input, pluginConfig, Date.now() / 1_000, platform);
+    const signal = await parseSmsForwarder(input, pluginConfig, Date.now() / 1_000, platform, {
+      method: request.method,
+      path: new URL(request.url).pathname,
+    });
     // 监听端的连通性探测心跳：已验签、无金额，直接回成功，别当成一次真实到账去匹配订单。
     // legacy=1 时回纯文本 "200"，兼容以正文判断成败的监听工具（mpay 等）。
     if (signal.probe) {
@@ -2062,7 +2076,7 @@ async function channelNotify(request, env, ctx, channelId) {
     return new Response('success');
   } catch (error) {
     console.warn('channel_notify_failed', { channelId, message: String(error.message ?? error) });
-    return new Response('fail', { status: 400 });
+    return new Response('fail', { status: Number(error.status) || 400 });
   }
 }
 
@@ -2071,8 +2085,9 @@ async function paymentCallback(request, env, ctx, paymentNo) {
   if (!payment) return new Response('fail', { status: 404 });
   const plugin = pluginOrNull(env, payment.plugin_code);
   if (!plugin) return new Response('fail', { status: 404 });
-  const snapshot = await providerCallbackSnapshot(request, plugin);
+  let snapshot = { source: 'provider_webhook', method: request.method, content_type: '', request: {} };
   try {
+    snapshot = await providerCallbackSnapshot(request, plugin);
     const config = configForPlugin(await runtimePluginConfig(env), plugin.manifest.code);
     await authorized(env, plugin, 'handleCallback');
     // GET 是渠道同步回跳，POST 是异步通知。插件没单独实现回跳就统一交给 handleCallback。
@@ -2093,6 +2108,7 @@ async function paymentCallback(request, env, ctx, paymentNo) {
   } catch (error) {
     await recordProviderCallbackFailure(env, payment, plugin, snapshot, error);
     console.warn('payment_callback_failed', { paymentNo, message: String(error.message ?? error) });
+    if (Number(error.status) === 413) return new Response('payload_too_large', { status: 413 });
     return plugin.callbackResponse
       ? plugin.callbackResponse({ ok: false })
       : new Response('fail', { status: 400 });
@@ -2378,7 +2394,7 @@ async function cashierContextApi(request, env) {
       public_config: cashierPublicConfig(siteConfig),
     });
   } catch (error) {
-    return cashierApiResponse(String(error.message ?? error), 400);
+    return cashierApiResponse(String(error.message ?? error), Number(error.status) || 400);
   }
 }
 
@@ -2404,7 +2420,7 @@ async function selectedCashierChannel(env, typeCode) {
 async function cashierConfirmApi(request, env) {
   try {
     await expireDuePayments(env);
-    const input = await request.json();
+    const input = await readBoundedJson(request, EPAY_PAYLOAD_MAX_BYTES, '收银台确认请求体');
     const bizNo = String(input?.biz_no ?? '').trim();
     const typeCode = String(input?.type ?? '').trim();
     if (!bizNo || !typeCode) throw new Error('biz_no 和 type 不能为空');
@@ -2453,7 +2469,7 @@ async function cashierConfirmApi(request, env) {
       ).toString(),
     });
   } catch (error) {
-    return cashierApiResponse(String(error.message ?? error), 400);
+    return cashierApiResponse(String(error.message ?? error), Number(error.status) || 400);
   }
 }
 
@@ -2611,7 +2627,7 @@ async function orderActionApi(request, env, ctx, paymentNo, actionCode) {
       await runtimePluginConfig(env),
     ));
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -2624,10 +2640,11 @@ function assertAdminMutationRequest(request) {
 }
 
 async function adminJsonBody(request) {
-  const length = Number(request.headers.get('content-length') ?? 0);
-  if (length > 1_000_000) throw new Error('管理配置内容过大');
   let body;
-  try { body = await request.json(); } catch { throw new Error('管理配置 JSON 格式不合法'); }
+  try { body = await readBoundedJson(request, 1_000_000, '管理配置请求体'); } catch (error) {
+    if (Number(error.status) === 413) throw Object.assign(new Error('管理配置内容过大'), { status: 413 });
+    throw new Error('管理配置 JSON 格式不合法');
+  }
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('管理配置格式不合法');
   return body;
 }
@@ -2819,7 +2836,7 @@ async function duplicatePluginApi(request, env) {
       plugin: publicPluginList(registry, config).find((item) => item.code === instanceCode),
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -2889,7 +2906,7 @@ async function deletePluginInstanceApi(request, env, pluginCode) {
       removed_channels: removedChannels.map((channel) => channel.id),
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -2951,7 +2968,7 @@ async function pluginConfigApi(request, env) {
       plugin: publicPluginList(registry, config).find((item) => item.code === plugin.manifest.code),
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3020,7 +3037,7 @@ async function pluginReceiptDiscoveryApi(request, env, pluginCode) {
     await writePlainJsonSetting(env, receiptDiscoveryKey(requestId), job);
     return jsonResponse({ ok: true, ...publicReceiptDiscovery(job) }, 202);
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3057,7 +3074,7 @@ async function siteConfigApi(request, env) {
     await writePlainJsonSetting(env, 'site_config', config);
     return jsonResponse({ ok: true, config, contact_url: contactUrl, poll_trigger_url: pollTriggerUrl });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3084,7 +3101,7 @@ async function keyManagementApi(request, env) {
     }
     throw new Error('不支持的密钥操作');
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3112,7 +3129,7 @@ async function clearSystemStatusApi(request, env) {
       listeners: await watcherSystemStatus(env, checkedAt),
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3180,7 +3197,7 @@ async function channelsApi(request, env) {
     await writePlainJsonSetting(env, 'channels', normalized);
     return jsonResponse({ ok: true, ...await adminChannelData(env, normalized) });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3202,7 +3219,7 @@ async function deleteChannelApi(request, env, channelId) {
       ...await adminChannelData(env, remaining),
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3264,7 +3281,7 @@ async function channelTestApi(request, env, channelId) {
       status: attempt.payment.status,
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
 }
 
@@ -3295,7 +3312,13 @@ async function adminLogin(request, env) {
     return fetchBundledAsset(new Request(new URL('/admin-login.html', request.url), request));
   }
   if (request.method !== 'POST') return adminLoginRedirect(request);
-  const result = await verifyAdminLogin(request, env);
+  let result;
+  try {
+    result = await verifyAdminLogin(request, env);
+  } catch (error) {
+    if (Number(error.status) === 413) return new Response('payload_too_large', { status: 413 });
+    throw error;
+  }
   if (!result.ok) {
     // 失败的登录必须同时作废已有会话，否则跳回 /admin/login 时那个 GET 会看到
     // 旧 cookie 仍然有效，直接把人送进 /admin/site——看起来就像"随便填也能进"。

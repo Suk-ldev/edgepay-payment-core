@@ -11,6 +11,8 @@ if (!globalThis.atob) globalThis.atob = (value) => Buffer.from(value, 'base64').
 
 const { createAdminSession } = await import('../src/admin-auth.js');
 const { encryptSetting } = await import('../src/runtime-settings.js');
+const { definePlugin } = await import('../src/plugin-api.js');
+const { PROVIDER_CALLBACK_MAX_BYTES, readBoundedText } = await import('../src/body-limits.js');
 const { createTestWorker } = await import('./helpers/worker.mjs');
 const worker = createTestWorker();
 
@@ -314,6 +316,74 @@ test('插件配置接口用授权目录展示未购买插件', async () => {
   assert.equal(refreshedResponse.status, 200);
   assert.equal(refreshedResponse.headers.get('x-edgepay-cache'), 'MISS');
   assert.equal(licenseStateCalls, 3, '保存插件配置后必须立即失效列表缓存');
+});
+
+test('管理 API 请求体超限时保留 413 状态码', async () => {
+  const env = {
+    ADMIN_TOKEN: 'test-admin-password',
+    ADMIN_USERNAME: 'admin',
+    DB: new MemoryDatabase(),
+  };
+  const cookie = (await createAdminSession(env)).split(';', 1)[0];
+  const response = await worker.fetch(new Request('https://pay.example/admin/api/site', {
+    method: 'PUT',
+    headers: {
+      cookie,
+      origin: 'https://pay.example',
+      'content-type': 'application/json',
+      'content-length': String(1_000_001),
+    },
+    body: '{}',
+  }), env, { waitUntil() {} });
+  const payload = await response.json();
+
+  assert.equal(response.status, 413);
+  assert.match(payload.error, /过大/u);
+});
+
+test('通道 notify 回调请求体超限时保留 413 状态码', async () => {
+  const boundedDirectPlugin = definePlugin({
+    manifest: {
+      code: 'bounded_direct',
+      name: '有界直连测试',
+      version: '1.0.0',
+      apiVersion: 1,
+      tier: 'FREE',
+      mode: 'direct',
+      runtime: 'direct',
+      payTypes: ['bank'],
+      required: [],
+      adminFields: [],
+    },
+    createPayment() {
+      return { pay_page: 'jump', pay_action: 'redirect', pay_params: { url: 'https://checkout.example/bounded' } };
+    },
+    async handleCallback({ request }) {
+      await readBoundedText(request, PROVIDER_CALLBACK_MAX_BYTES, '渠道回调请求体');
+      return { status: 'pending', payNo: 'p_bounded' };
+    },
+  });
+  const notifyWorker = createTestWorker({ plugins: [boundedDirectPlugin] });
+  const env = {
+    DB: new MemoryDatabase(new Map([['channels', JSON.stringify([{
+      id: 42,
+      name: '有界直连',
+      plugin_code: 'bounded_direct',
+      pay_types: ['bank'],
+      weight: 100,
+      enabled: true,
+    }])]])),
+  };
+  const response = await notifyWorker.fetch(new Request('https://pay.example/api/pay/42/notify', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'content-length': String(PROVIDER_CALLBACK_MAX_BYTES + 1),
+    },
+    body: '{}',
+  }), env, { waitUntil() {} });
+
+  assert.equal(response.status, 413);
 });
 
 test('后台 API 只在管理员主动提交后创建真实待支付测试单，并可读取记录', async () => {

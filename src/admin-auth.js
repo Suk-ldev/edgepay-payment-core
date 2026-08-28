@@ -1,3 +1,5 @@
+import { EPAY_PAYLOAD_MAX_BYTES, readBoundedText } from './body-limits.js';
+
 const encoder = new TextEncoder();
 const SESSION_COOKIE = 'admin_session';
 const SESSION_SECONDS = 12 * 60 * 60;
@@ -161,7 +163,7 @@ async function saveLoginFailure(env, identity, failureCount, lockedUntil, update
 }
 
 export async function verifyAdminLogin(request, env, nowMilliseconds = Date.now()) {
-  const body = await request.text();
+  const body = await readBoundedText(request, EPAY_PAYLOAD_MAX_BYTES, '管理登录请求体');
   const params = new URLSearchParams(body);
   const username = params.get('username') ?? '';
   const password = params.get('password') ?? '';

@@ -1,3 +1,4 @@
+import { EPAY_PAYLOAD_MAX_BYTES, readBoundedText } from './body-limits.js';
 import { safeWebhookUrl } from './security.js';
 
 const textEncoder = new TextEncoder();
@@ -100,7 +101,7 @@ export async function readEpayPayload(request) {
   if (request.method === 'GET' || request.method === 'HEAD') return payload;
 
   const contentType = request.headers.get('content-type') ?? '';
-  const raw = await request.text();
+  const raw = await readBoundedText(request, EPAY_PAYLOAD_MAX_BYTES, 'ePay 请求体');
   if (!raw) return payload;
   if (contentType.includes('application/json')) {
     const body = JSON.parse(raw);

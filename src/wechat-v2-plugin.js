@@ -7,6 +7,8 @@
  */
 import { md5Hex } from './epay-v1.js';
 
+import { PROVIDER_CALLBACK_MAX_BYTES, readBoundedText } from './body-limits.js';
+
 const encoder = new TextEncoder();
 const V2_SUCCESS_XML = '<xml><return_code><![CDATA[SUCCESS]]></return_code><return_msg><![CDATA[OK]]></return_msg></xml>';
 const V2_FAIL_XML = '<xml><return_code><![CDATA[FAIL]]></return_code><return_msg><![CDATA[FAIL]]></return_msg></xml>';
@@ -703,7 +705,7 @@ function wechatTime(value) {
 }
 
 export async function handleWechatV2Notify(request, config) {
-  const raw = await request.text();
+  const raw = await readBoundedText(request, PROVIDER_CALLBACK_MAX_BYTES, '微信支付回调请求体');
   const data = decodeWechatXml(raw);
   const suppliedSign = text(data.sign);
   if (!suppliedSign) throw new Error('微信支付 V2 通知验签失败');

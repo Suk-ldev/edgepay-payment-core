@@ -221,8 +221,28 @@ test('支付宝异步通知保持原参数排除规则、app_id 校验和状态�
   const result = await handleAlipayNotify(request, config);
   assert.equal(result.status, 'success');
   assert.equal(result.payNo, 'p_contract4');
+  assert.equal(result.amountFen, 2000);
   assert.equal(result.channelTradeNo, '2026072700001');
   assert.equal(result.eventId, 'notify_contract_1');
+});
+
+test('支付宝和微信直连回调在解析前拒绝超限请求体', async () => {
+  await assert.rejects(
+    () => handleAlipayNotify(new Request('https://worker.example/api/pay/p_contract4/callback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': String(300 * 1024) },
+      body: 'out_trade_no=p_contract4',
+    }), { app_id: 'app', alipay_public_key: 'public' }),
+    /超过/u,
+  );
+  await assert.rejects(
+    () => handleWechatV2Notify(new Request('https://worker.example/api/pay/p_contract5/callback', {
+      method: 'POST',
+      headers: { 'content-type': 'text/xml', 'content-length': String(300 * 1024) },
+      body: '<xml/>',
+    }), { mch_id: '1900000001', api_v2_key: 'key' }),
+    /超过/u,
+  );
 });
 test('微信 V2 Native 下单保持原 unifiedorder XML 与 HMAC-SHA256 签名', async () => {
   const originalFetch = globalThis.fetch;

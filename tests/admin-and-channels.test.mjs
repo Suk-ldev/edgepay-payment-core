@@ -97,6 +97,18 @@ test('管理员登录建立 HTTP-only 签名会话', async () => {
   assert.equal(await isAdminSession(new Request('https://pay.example/admin', { headers: { cookie: session } }), env), true);
 });
 
+test('管理员登录请求体超限时在解析前拒绝', async () => {
+  const request = new Request('https://pay.example/admin/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': String(70 * 1024) },
+    body: 'username=admin',
+  });
+  await assert.rejects(
+    () => verifyAdminLogin(request, { ADMIN_USERNAME: 'admin', ADMIN_TOKEN: 'test-admin-token', DB: memoryLoginDb() }),
+    /超过/u,
+  );
+});
+
 test('通道按类型筛选，并保留权重随机路由', () => {
   const channels = parseChannels([
     { id: 10, name: 'A', plugin_code: 'fubei_receipt', pay_types: ['wxpay'], weight: 10, enabled: true },

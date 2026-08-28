@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ePaySignContent, md5Hex, moneyToFen } from '../src/epay-v1.js';
+import { EPAY_PAYLOAD_MAX_BYTES, readBoundedText } from '../src/body-limits.js';
+import { ePaySignContent, md5Hex, moneyToFen, readEpayPayload } from '../src/epay-v1.js';
 import { safeWebhookUrl } from '../src/security.js';
 
 test('ePay V1 签名原文保持原项目的排序和过滤规则', () => {
@@ -27,4 +28,29 @@ test('商户通知只接受公共 HTTPS 地址', () => {
   assert.equal(safeWebhookUrl('https://example.com/notify'), true);
   assert.equal(safeWebhookUrl('http://example.com/notify'), false);
   assert.equal(safeWebhookUrl('https://127.0.0.1/notify'), false);
+});
+
+test('ePay 请求体在读取前按 Content-Length 拒绝超限 body', async () => {
+  const request = new Request('https://worker.example/submit.php', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'content-length': String(EPAY_PAYLOAD_MAX_BYTES + 1) },
+    body: 'pid=1000',
+  });
+  await assert.rejects(() => readEpayPayload(request), /超过/u);
+});
+
+test('请求体没有 Content-Length 时仍按流式累计大小限制', async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(EPAY_PAYLOAD_MAX_BYTES));
+      controller.enqueue(new Uint8Array(1));
+      controller.close();
+    },
+  });
+  const request = new Request('https://worker.example/submit.php', {
+    method: 'POST',
+    body: stream,
+    duplex: 'half',
+  });
+  await assert.rejects(() => readBoundedText(request, EPAY_PAYLOAD_MAX_BYTES, '测试请求体'), /超过/u);
 });

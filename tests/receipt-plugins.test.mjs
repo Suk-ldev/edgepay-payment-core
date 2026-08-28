@@ -7,7 +7,7 @@ import {
   hmacSha256Base64, moneyTextToFen, paidAtIso, paidAtTimestamp, parseSmsForwarder,
   paymentWindowMatches, payTypeMatches, readSignedWatcherPayload, receiptRemarkCode,
   selectPersonalReceipt, verifyStaticPollToken, verifyWatcherSnapshotRequest,
-  watcherRecord, watcherRecords, decimalToInteger,
+  watcherRecord, watcherRecords, decimalToInteger, smsForwarderSignContent,
 } from '../src/receipt-plugins.js';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -22,6 +22,16 @@ function payment(overrides = {}) {
     metadata: { epay_type: 'wxpay' },
     ...overrides,
   };
+}
+
+async function smsSign(secret, input, context = { method: 'POST', path: '/api/pay/8/notify' }) {
+  return `v2=${await hmacSha256Base64(secret, await smsForwarderSignContent({
+    timestamp: input.timestamp,
+    method: context.method,
+    path: context.path,
+    from: input.from,
+    content: input.content,
+  }))}`;
 }
 
 test('静态轮询 Token 只接受完全匹配的 GET 查询参数', () => {
@@ -100,28 +110,57 @@ test('付呗备注模式同时校验四位备注、原始金额和支付时间',
   });
   assert.equal(selected.payment.payment_no, 'p_receipt_1');
 });
-test('SmsForwarder 保持原 timestamp 换行 secret 的 HMAC 和微信通知解析', async () => {
+test('SmsForwarder v2 签名绑定来源、路径和正文后解析微信通知', async () => {
   const secret = 'sms-test-secret';
   const timestamp = 1_800_000_000_000;
   const input = {
     timestamp: String(timestamp),
-    sign: await hmacSha256Base64(secret, `${timestamp}\n${secret}`),
     from: 'com.tencent.mm',
     content: JSON.stringify({ title: '微信收款助手', msg: '微信收款到账 10.01 元，付款备注：2048' }),
   };
+  input.sign = await smsSign(secret, input);
   const parsed = await parseSmsForwarder(input, {
     sms_forwarder_secret: secret,
     sms_forwarder_time_tolerance: 300,
-  }, timestamp / 1_000);
+  }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/8/notify' });
   assert.equal(parsed.amountFen, 1_001);
   assert.equal(parsed.remarkCode, '2048');
+  await assert.rejects(
+    () => parseSmsForwarder({
+      ...input,
+      content: JSON.stringify({ title: '微信收款助手', msg: '微信收款到账 99.99 元，付款备注：2048' }),
+    }, {
+      sms_forwarder_secret: secret,
+      sms_forwarder_time_tolerance: 300,
+    }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/8/notify' }),
+    /签名校验失败/u,
+  );
+  await assert.rejects(
+    () => parseSmsForwarder(input, {
+      sms_forwarder_secret: secret,
+      sms_forwarder_time_tolerance: 300,
+    }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/9/notify' }),
+    /签名校验失败/u,
+  );
+  const blankSource = { ...input, from: '' };
+  blankSource.sign = await smsSign(secret, blankSource);
+  await assert.rejects(
+    () => parseSmsForwarder({
+      timestamp: blankSource.timestamp,
+      content: blankSource.content,
+      sign: blankSource.sign,
+    }, {
+      sms_forwarder_secret: secret,
+      sms_forwarder_time_tolerance: 300,
+    }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/8/notify' }),
+    /来源不能为空/u,
+  );
 });
 test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功返回', async () => {
   const secret = 'sms-test-secret';
   const timestamp = 1_800_000_000_000;
   const input = {
     timestamp: String(timestamp),
-    sign: await hmacSha256Base64(secret, `${timestamp}\n${secret}`),
     from: 'com.tencent.mm',
     content: JSON.stringify({
       title: '微信收款助手',
@@ -130,10 +169,11 @@ test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功�
       watcher_instance: 'phone-test-1',
     }),
   };
+  input.sign = await smsSign(secret, input);
   const parsed = await parseSmsForwarder(input, {
     sms_forwarder_secret: secret,
     sms_forwarder_time_tolerance: 300,
-  }, timestamp / 1_000);
+  }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/8/notify' });
   assert.equal(parsed.probe, true);
   assert.equal(parsed.amountFen, undefined);
   assert.equal(parsed.content.watcher_kind, 'android');
@@ -143,7 +183,7 @@ test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功�
     () => parseSmsForwarder({ ...input, sign: 'wrong' }, {
       sms_forwarder_secret: secret,
       sms_forwarder_time_tolerance: 300,
-    }, timestamp / 1_000),
+    }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/8/notify' }),
     /签名校验失败/u,
   );
 });
@@ -152,14 +192,14 @@ test('支付宝个人收款使用 SmsForwarder 自监听并解析标题金额', 
   const timestamp = 1_800_000_000_000;
   const input = {
     timestamp: String(timestamp),
-    sign: await hmacSha256Base64(secret, `${timestamp}\n${secret}`),
     from: 'com.eg.android.AlipayGphone',
     content: JSON.stringify({ title: '成功收款10.02元', msg: '支付宝收钱到账，收款备注：4096' }),
   };
+  input.sign = await smsSign(secret, input);
   const parsed = await parseSmsForwarder(input, {
     sms_forwarder_secret: secret,
     sms_forwarder_time_tolerance: 300,
-  }, timestamp / 1_000, 'alipay');
+  }, timestamp / 1_000, 'alipay', { method: 'POST', path: '/api/pay/8/notify' });
   assert.equal(parsed.amountFen, 1_002);
   assert.equal(parsed.remarkCode, '4096');
   assert.equal(parsed.platform, 'alipay');
@@ -167,7 +207,16 @@ test('支付宝个人收款使用 SmsForwarder 自监听并解析标题金额', 
     () => parseSmsForwarder({ ...input, from: 'com.tencent.mm' }, {
       sms_forwarder_secret: secret,
       sms_forwarder_time_tolerance: 300,
-    }, timestamp / 1_000, 'alipay'),
+    }, timestamp / 1_000, 'alipay', { method: 'POST', path: '/api/pay/8/notify' }),
+    /签名校验失败/u,
+  );
+  const wrongSource = { ...input, from: 'com.tencent.mm' };
+  wrongSource.sign = await smsSign(secret, wrongSource);
+  await assert.rejects(
+    () => parseSmsForwarder(wrongSource, {
+      sms_forwarder_secret: secret,
+      sms_forwarder_time_tolerance: 300,
+    }, timestamp / 1_000, 'alipay', { method: 'POST', path: '/api/pay/8/notify' }),
     /非支付宝通知来源/u,
   );
 });

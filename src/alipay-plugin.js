@@ -8,6 +8,8 @@
  * and result fields mirror the source.
  */
 
+import { PROVIDER_CALLBACK_MAX_BYTES, readBoundedText } from './body-limits.js';
+
 const GATEWAY_PRODUCTION = 'https://openapi.alipay.com/gateway.do';
 const GATEWAY_SANDBOX = 'https://openapi-sandbox.dl.alipaydev.com/gateway.do';
 const PRODUCT_WEB = 'web';
@@ -16,6 +18,7 @@ const PRODUCT_APP = 'app';
 const PRODUCT_MINI = 'mini';
 const PRODUCT_POS = 'pos';
 const PRODUCT_SCAN = 'scan';
+
 const encoder = new TextEncoder();
 
 function text(value) {
@@ -29,6 +32,13 @@ function boolValue(value) {
 
 function amountText(amountFen) {
   return (Number(amountFen) / 100).toFixed(2);
+}
+
+function moneyTextToFen(value) {
+  const input = text(value);
+  if (!/^\d+(?:\.\d{1,2})?$/u.test(input)) throw new Error('支付宝通知金额格式不合法');
+  const [yuan, cents = ''] = input.split('.');
+  return (Number(yuan) * 100) + Number(cents.slice(0, 2).padEnd(2, '0'));
 }
 
 function utf8ByteCut(value, maxBytes) {
@@ -679,13 +689,10 @@ export async function refundAlipayPayment(config, order) {
   };
 }
 
-async function requestParameters(request) {
+function requestParameters(request, rawBody = '') {
   const values = Object.fromEntries(new URL(request.url).searchParams.entries());
   if (!['GET', 'HEAD'].includes(request.method)) {
-    const form = await request.clone().formData();
-    for (const [key, value] of form.entries()) {
-      if (typeof value === 'string') values[key] = value;
-    }
+    Object.assign(values, Object.fromEntries(new URLSearchParams(rawBody).entries()));
   }
   return values;
 }
@@ -697,8 +704,10 @@ function notifyStatus(tradeStatus) {
 }
 
 export async function handleAlipayNotify(request, config) {
-  const raw = await request.clone().text();
-  const params = await requestParameters(request);
+  const raw = ['GET', 'HEAD'].includes(request.method)
+    ? new URL(request.url).searchParams.toString()
+    : await readBoundedText(request.clone(), PROVIDER_CALLBACK_MAX_BYTES, '支付宝回调请求体');
+  const params = requestParameters(request, raw);
   if (!await rsa2Verify(
     alipaySignContent(params, true),
     params.sign,
@@ -715,12 +724,15 @@ export async function handleAlipayNotify(request, config) {
   if (!payNo) throw new Error('支付宝异步通知缺少 out_trade_no');
   const tradeStatus = text(params.trade_status).toUpperCase();
   const status = notifyStatus(tradeStatus);
+  const amountFen = params.total_amount ? moneyTextToFen(params.total_amount) : 0;
+  if (status === 'success' && amountFen <= 0) throw new Error('支付宝通知金额格式不合法');
   const eventId = text(params.notify_id)
     || `alipay:${tradeNo || payNo}:${tradeStatus || 'PENDING'}:${text(params.gmt_payment || params.notify_time)}`;
 
   return {
     status,
     payNo,
+    amountFen,
     message: tradeStatus,
     channelOrderNo: payNo,
     channelTradeNo: tradeNo || payNo,

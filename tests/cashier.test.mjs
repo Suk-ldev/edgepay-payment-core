@@ -258,6 +258,29 @@ test('收银台接口会把已过期支付单真实落为超时状态', async ()
   assert.ok(payload.data.timeout_at);
 });
 
+test('收银台确认和在线证明接口拒绝超限 JSON 请求体', async () => {
+  const { env } = await fixture();
+  const ctx = { waitUntil() {} };
+  const tooLarge = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'content-length': String(70 * 1024) },
+    body: '{}',
+  };
+  const confirm = await worker.fetch(
+    new Request('https://pay.example/api/cashier/confirm', tooLarge),
+    env,
+    ctx,
+  );
+  assert.equal(confirm.status, 413);
+
+  const attest = await worker.fetch(
+    new Request('https://pay.example/api/license/attest', tooLarge),
+    env,
+    ctx,
+  );
+  assert.equal(attest.status, 413);
+});
+
 test('收银台页面路由不会吞掉 custom.js 等静态资源', () => {
   assert.equal(isCashierShellPath('/cashier/2026072721070531961034216'), true);
   assert.equal(isCashierShellPath('/payment/p_cdb909a2c8f84a25831e80252d1d6c'), true);
