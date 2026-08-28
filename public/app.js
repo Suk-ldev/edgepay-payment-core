@@ -3,6 +3,7 @@ const channelBody = document.querySelector('#channels-body');
 const systemStatusGrid = document.querySelector('#system-status-grid');
 const systemStatusChecked = document.querySelector('#system-status-checked');
 const systemStatusRefresh = document.querySelector('#refresh-system-status');
+const systemStatusClear = document.querySelector('#clear-system-status');
 const orderBody = document.querySelector('#orders-body');
 const orderFilters = document.querySelector('#order-filters');
 const ordersSummary = document.querySelector('#orders-summary');
@@ -1897,6 +1898,21 @@ systemStatusRefresh.addEventListener('click', async () => {
     await loadSystemStatus();
   } catch (error) {
     if (error.message !== 'unauthorized') showNotice(error.message, 'error');
+  }
+});
+
+systemStatusClear?.addEventListener('click', async () => {
+  if (!confirm('清除所有监听端的在线状态？仍在运行的监听端会在下次上报后重新出现。')) return;
+  systemStatusClear.disabled = true;
+  systemStatusClear.textContent = '清除中…';
+  try {
+    renderSystemStatus(await request('/admin/api/system-status/clear', { method: 'POST', body: JSON.stringify({}) }));
+    showNotice('在线状态已清除');
+  } catch (error) {
+    if (error.message !== 'unauthorized') showNotice(error.message, 'error');
+  } finally {
+    systemStatusClear.disabled = false;
+    systemStatusClear.textContent = '清除在线状态';
   }
 });
 

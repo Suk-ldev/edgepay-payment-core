@@ -45,8 +45,8 @@ import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
 import {
   PRESENCE_PREFIX, PRESENCE_SWEEP_MS, PRESENCE_TTL_MS,
-  liveWatcherInstances, onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances,
-  watcherChannelPresence, watcherSystemStatus,
+  clearWatcherPresence, liveWatcherInstances, onlineWatcherPlugins, presenceKey, recordWatcherPresence,
+  staleWatcherInstances, watcherChannelPresence, watcherSystemStatus,
 } from '../watcher-presence.js';
 import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
 import { pluginContext } from './plugin-context.js';
@@ -3098,6 +3098,24 @@ async function systemStatusApi(request, env) {
   });
 }
 
+async function clearSystemStatusApi(request, env) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'POST') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    const cleared = await clearWatcherPresence(env);
+    const checkedAt = Date.now();
+    return jsonResponse({
+      ok: true,
+      cleared,
+      checked_at: new Date(checkedAt).toISOString(),
+      listeners: await watcherSystemStatus(env, checkedAt),
+    });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
 async function adminChannelData(env, channels = null) {
   const [resolvedChannels, config, licensed, listenerPresence] = await Promise.all([
     channels ? Promise.resolve(channels) : runtimeChannels(env),
@@ -3430,6 +3448,7 @@ async function route(request, env, ctx) {
   if (pathname === '/admin/api/alerts/test' && request.method === 'POST') return alertTestApi(request, env);
   if (pathname === '/admin/api/keys' && ['GET', 'POST'].includes(request.method)) return keyManagementApi(request, env);
   if (pathname === '/admin/api/system-status' && request.method === 'GET') return systemStatusApi(request, env);
+  if (pathname === '/admin/api/system-status/clear' && request.method === 'POST') return clearSystemStatusApi(request, env);
   if (pathname === '/admin/api/channels' && ['GET', 'PUT'].includes(request.method)) return channelsApi(request, env);
   const adminChannelDeleteMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)$/u);
   if (adminChannelDeleteMatch && request.method === 'DELETE') {

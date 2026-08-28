@@ -68,6 +68,21 @@ export async function recordWatcherPresence(env, key, capabilities, now = Date.n
 }
 
 /**
+ * 清空所有监听端在线状态。
+ *
+ * 管理员在后台手动触发：测试时临时加的设备（多开的模拟器等）删掉后，它那条
+ * presence 行还会挂到 TTL 过期，让在线计数停在 1/2 之类的假数字。这里把整批
+ * 清掉，仍在运行的监听端会在下一次上报时自己回来（Android 心跳约一分钟一次，
+ * Docker/应用宝桥接各按自己的间隔），删掉的测试设备则不再出现。
+ */
+export async function clearWatcherPresence(env) {
+  const result = await env.DB.prepare(`
+    DELETE FROM runtime_settings WHERE setting_key = 'watcher_presence' OR setting_key LIKE ?
+  `).bind(`${PRESENCE_PREFIX}%`).run();
+  return Number(result?.meta?.changes ?? 0);
+}
+
+/**
  * 刚掉线的实例：上报过，停了超过存活窗口，但还没停到"早就不在了"。
  *
  * 判据必须是"上报过"：从没上报过的部署（根本没装 Watcher）不该被当成掉线，

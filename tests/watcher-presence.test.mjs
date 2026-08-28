@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { webcrypto } from 'node:crypto';
 import {
-  onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances,
+  clearWatcherPresence, onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances,
   watcherChannelPresence, watcherSystemStatus,
 } from '../src/watcher-presence.js';
 
@@ -180,4 +180,30 @@ test('坏掉的行被跳过，不影响其他实例', async () => {
     ['watcher_presence:id:ok', { value_text: JSON.stringify({ plugins: ['wxpay_receipt'] }), updated_at: new Date(NOW).toISOString() }],
   ]);
   assert.deepEqual([...await onlineWatcherPlugins({ DB: memoryDb(rows) }, NOW)], ['wxpay_receipt']);
+});
+
+test('清除在线状态删掉所有 presence 行，计数归零', async () => {
+  const env = { DB: memoryDb() };
+  // 一个 Docker Watcher、一个测试用的安卓实例，两条都要被清掉。
+  await recordWatcherPresence(env, await presenceKey('', ['alipay_bill_receipt']), ['alipay_bill_receipt'], NOW, { kind: 'docker' });
+  await recordWatcherPresence(
+    env,
+    await presenceKey('android-9-5aee5836-883e-48f4-baf6-c6e5b623d079', ['wxpay_receipt']),
+    ['wxpay_receipt'],
+    NOW,
+    { polling: false, kind: 'android', channelIds: [9] },
+  );
+  const before = await watcherSystemStatus(env, NOW);
+  assert.equal(before.docker.total_instances, 1);
+  assert.equal(before.android.total_instances, 1);
+
+  await clearWatcherPresence(env);
+
+  const after = await watcherSystemStatus(env, NOW);
+  for (const kind of ['docker', 'yyb_bridge', 'android']) {
+    assert.equal(after[kind].total_instances, 0);
+    assert.equal(after[kind].online_instances, 0);
+    assert.equal(after[kind].status, 'unknown');
+  }
+  assert.equal((await onlineWatcherPlugins(env, NOW)).size, 0);
 });
