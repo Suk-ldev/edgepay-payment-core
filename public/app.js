@@ -266,7 +266,7 @@ function renderPlugins(plugins = pluginsState) {
     return matchesKeyword && matchesStatus;
   });
   pluginBody.innerHTML = filtered.length ? filtered.map((plugin) => `<tr class="${plugin.licensed ? '' : 'ui-plugin-unlicensed'}">
-    <td><strong>${text(plugin.name)}</strong>${Number(plugin.instance_sequence ?? 1) > 1 ? '<span class="ui-test-order-tag">副本</span>' : ''}<small>${text(plugin.code)}</small></td>
+    <td><strong>${text(plugin.name)}</strong>${Number(plugin.instance_sequence ?? 1) > 1 ? `<span class="ui-test-order-tag" title="监听端按这个编号认领配置">配置 ${Number(plugin.instance_sequence) - 1}</span>` : ''}<small>${text(plugin.code)}</small></td>
     <td>${text((Array.isArray(plugin.payTypes) ? plugin.payTypes : []).join(' / ') || '购买后显示')}</td>
     <td>${text(modeName(plugin))}</td>
     <td>${plugin.licensed ? `
@@ -1209,7 +1209,8 @@ function openPluginDuplicate(pluginCode) {
   duplicateSourceCode = pluginCode;
   const payTypes = Array.isArray(plugin.payTypes) ? plugin.payTypes : [];
   pluginDuplicateForm.reset();
-  document.querySelector('#plugin-duplicate-source').textContent = `从「${plugin.name}」复制一个账号位。副本和它的通道都会先停用，配置齐了再启用。`;
+  const nextInstance = pluginsState.filter((candidate) => candidate.base_code === (plugin.base_code ?? plugin.code)).length;
+  document.querySelector('#plugin-duplicate-source').textContent = `从「${plugin.name}」复制一个账号位，将成为配置 ${nextInstance}（默认配置是 0）。副本和它的通道都会先停用，配置齐了再启用。`;
   document.querySelector('#plugin-duplicate-name').value = `${plugin.base_name ?? plugin.name} ${Number(plugin.instance_sequence ?? 1) + 1}`;
   document.querySelector('#plugin-duplicate-pay-type').innerHTML = ['<option value="">暂不新建</option>']
     .concat(payTypes.map((payType) => `<option value="${text(payType)}">${text(payType)}</option>`))
