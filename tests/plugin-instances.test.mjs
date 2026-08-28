@@ -24,6 +24,7 @@ const { parseChannels, resolveChannel, weightedChannel } = await import('../src/
 const { createPluginRegistry, freePlugins } = await import('../src/index.js');
 const { createAdminSession } = await import('../src/admin-auth.js');
 const { encryptSetting, decryptSetting } = await import('../src/runtime-settings.js');
+const { hmacSha256Base64 } = await import('../src/receipt-plugins.js');
 const { createTestWorker } = await import('./helpers/worker.mjs');
 
 const registry = createPluginRegistry([...freePlugins]);
@@ -346,4 +347,85 @@ test('删除副本连同它的通道一起删，基础插件删不掉', async ()
   // 删除路由的正则只认副本编码，基础插件连路由都匹配不上（落到静态资源兜底的 405）。
   assert.equal(base.status, 405);
   assert.equal('wxpay_receipt' in (await storedConfig()), false);
+});
+
+test('告警指名道姓说是哪条通道，两个账号各报各的', async () => {
+  // 出事时要找的是通道，不是插件编码。两台监听器用同一个 event 名的话，第二条会被
+  // 第一条的静默期吞掉——人只会看到一条告警，还不知道说的是哪个微信。
+  const { env, call, configKey } = await fixture();
+  await call('/admin/api/plugins/duplicate', {
+    method: 'POST',
+    body: JSON.stringify({
+      plugin_code: 'wxpay_receipt',
+      name: '微信个人 · 个人号',
+      channel: { pay_type: 'wxpay', weight: 30 },
+    }),
+  });
+  // 基础配置也来一条通道，凑齐"两个账号两条通道"。
+  const channels = JSON.parse(env.DB.settings.get('channels'));
+  channels.push({
+    id: 8, name: '微信个人 · 商业号', plugin_code: 'wxpay_receipt', pay_types: ['wxpay'], weight: 70, sort: 9,
+  });
+  env.DB.settings.set('channels', JSON.stringify(channels));
+
+  env.WATCHER_TRANSPORT_SECRET = 'alert-transport-secret';
+  await env.DB.prepare('INSERT INTO runtime_settings').bind(
+    'alert_config',
+    await encryptSetting(
+      { enabled: true, provider: 'webhook', url: 'https://hook.example/push', min_interval_seconds: 600 },
+      configKey,
+      'alert_config',
+    ),
+  ).run();
+
+  const pushed = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    pushed.push(JSON.parse(init.body));
+    return new Response('ok', { status: 200 });
+  };
+  try {
+    const report = async (channelId) => {
+      const body = JSON.stringify({
+        event: 'yyb_login_expired:wxpay_receipt',
+        level: 'critical',
+        title: '应用宝协议监听掉登录',
+        message: '登录态已失效。',
+        channel_id: channelId,
+      });
+      const timestamp = String(Math.floor(Date.now() / 1_000));
+      const path = '/api/watcher/alert';
+      const signature = await hmacSha256Base64(env.WATCHER_TRANSPORT_SECRET, `${timestamp}.POST.${path}.${body}`);
+      const response = await call(path, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-watcher-timestamp': timestamp,
+          'x-watcher-signature': `v1=${signature}`,
+        },
+        body,
+      });
+      return response.json();
+    };
+
+    const first = await report(1);   // 副本那条通道
+    const second = await report(8);  // 基础配置那条通道
+
+    assert.equal(first.sent, true);
+    assert.equal(second.sent, true, '两条通道必须各推一条，不能被静默期吞掉');
+    assert.notEqual(first.event, second.event);
+    assert.match(first.event, /:ch1$/u);
+    assert.match(second.event, /:ch8$/u);
+
+    // 正文开头就要说清是哪条通道：推到手机上只看得见前几行。
+    assert.match(pushed[0].text ?? pushed[0].content ?? JSON.stringify(pushed[0]), /#1/u);
+    const firstBody = JSON.stringify(pushed[0]);
+    assert.match(firstBody, /微信个人 · 个人号/u);
+    assert.match(firstBody, /配置 1/u);
+    const secondBody = JSON.stringify(pushed[1]);
+    assert.match(secondBody, /微信个人 · 商业号/u);
+    assert.match(secondBody, /配置 0/u);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

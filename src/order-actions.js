@@ -367,11 +367,12 @@ export function confirmationSource(row = {}) {
   const metadata = parseJson(row.metadata_json);
   const raw = parseJson(row.receipt_event_raw_json);
   const eventSource = String(row.receipt_event_source ?? '');
+  const eventBaseSource = basePluginCode(eventSource);
   let code = String(raw.delivery_source ?? raw.source ?? '').trim();
 
-  if (!code && eventSource) {
-    if (['wxpay_receipt', 'alipay_receipt'].includes(eventSource)) code = 'sms_forwarder';
-    else if (['fubei_receipt', 'usdt_trc20_receipt'].includes(eventSource)) code = 'watcher';
+  if (!code && eventBaseSource) {
+    if (['wxpay_receipt', 'alipay_receipt'].includes(eventBaseSource)) code = 'sms_forwarder';
+    else if (['fubei_receipt', 'usdt_trc20_receipt'].includes(eventBaseSource)) code = 'watcher';
     else code = 'provider_webhook';
   }
   if (!code) code = String(metadata.payment_confirmation?.source ?? '').trim();

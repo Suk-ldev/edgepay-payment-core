@@ -69,3 +69,14 @@ export function nextInstanceSequence(baseCode, existingCodes) {
 export function defaultInstanceName(baseName, sequence) {
   return `${baseName} ${sequence}`;
 }
+
+/**
+ * 这份配置对外的编号：**0 是默认配置，1 是第一份复制**。
+ *
+ * 内部序号从 1 起（基础插件占掉 1 号），对外从 0 起——监听端要填的就是这个数字，
+ * 两套编号差一位，换算只在这里做一次。告警正文也用它，好让人直接对上容器的
+ * `PLUGIN_INSTANCE`。
+ */
+export function pluginConfigNumber(code) {
+  return pluginInstanceSequence(code) - 1;
+}

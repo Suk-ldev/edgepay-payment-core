@@ -118,6 +118,21 @@ test('订单确认来源可区分 Worker、Watcher、SmsForwarder 与手动补�
     receipt_event_source: 'wxpay_receipt',
     receipt_event_raw_json: '{}',
   }).label, 'SmsForwarder');
+  assert.deepEqual(confirmationSource({
+    receipt_event_source: 'wxpay_receipt~2',
+    receipt_event_raw_json: '{}',
+  }), {
+    code: 'sms_forwarder',
+    label: 'SmsForwarder',
+    event_id: '',
+    state: '',
+    received_at: '',
+    processed_at: '',
+  });
+  assert.equal(confirmationSource({
+    receipt_event_source: 'alipay_receipt~3',
+    receipt_event_raw_json: '{}',
+  }).label, 'SmsForwarder');
   assert.equal(confirmationSource({
     metadata_json: JSON.stringify({ payment_confirmation: { source: 'manual' } }),
   }).label, '后台手动补单');

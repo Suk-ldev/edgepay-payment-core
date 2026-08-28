@@ -55,7 +55,7 @@ import {
   pluginDisplayName, pluginEnabled, publicPluginList,
 } from './plugin-config.js';
 import {
-  basePluginCode, isPluginInstanceCode, nextInstanceSequence, pluginInstanceCode,
+  basePluginCode, isPluginInstanceCode, nextInstanceSequence, pluginConfigNumber, pluginInstanceCode,
 } from '../plugin-instances.js';
 
 // 插件要额外带给 Watcher / 轮询器的收款信息统一放在订单 metadata 的这个键下。
@@ -1483,20 +1483,64 @@ async function watcherAlertApi(request, env) {
   } catch {
     return unauthorized();
   }
-  const event = String(signed.payload.event ?? '').trim();
-  if (!event) return jsonResponse({ ok: false, error: '缺少 event' }, 400);
+  const declared = String(signed.payload.event ?? '').trim();
+  if (!declared) return jsonResponse({ ok: false, error: '缺少 event' }, 400);
+  // 上报方带了通道号就按通道分事件。两台监听器（两个微信）掉登录时用的是同一个
+  // event 名，不分开的话第二条会被第一条的静默期吞掉，人只会看到一条告警、
+  // 还不知道说的是哪个账号。旧版监听器不带 channel_id，行为保持原样。
+  const channelId = Number(signed.payload.channel_id ?? 0);
+  const channel = Number.isSafeInteger(channelId) && channelId > 0
+    ? channelById(await runtimeChannels(env), channelId)
+    : null;
+  const event = channel ? `${declared}:ch${channel.id}` : declared;
   // resolved=true 表示"恢复了"：清掉静默期，下次再出事能立刻提醒。
   if (signed.payload.resolved === true) {
     await clearAlert(env, event);
-    return jsonResponse({ ok: true, cleared: true });
+    return jsonResponse({ ok: true, cleared: true, event });
   }
+  let label = '';
+  if (channel) {
+    const { registry } = runtimeOf(env);
+    label = channelAlertLabel(registry, await runtimePluginConfig(env), channel);
+  }
+  const message = String(signed.payload.message ?? '');
   const result = await emitAlert(env, {
     event,
     level: String(signed.payload.level ?? 'warning'),
     title: String(signed.payload.title ?? 'EdgePay 告警'),
-    message: String(signed.payload.message ?? ''),
+    // 通道标签放最前面：推送到手机上只看得见开头几行，得先说清是哪条通道。
+    message: label ? `${label}\n${message}` : message,
   }, { secret: settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '') });
-  return jsonResponse({ ok: true, ...result });
+  return jsonResponse({ ok: true, event, ...result });
+}
+
+/**
+ * 一条告警里怎么称呼一条通道。
+ *
+ * 出事时要找的是通道，不是插件编码：通道号是回调地址的一部分，通道名是管理员自己
+ * 起的，配置编号是监听容器 `PLUGIN_INSTANCE` 要填的那个数字。三样凑齐才不用去猜
+ * "挂的是哪个微信"。
+ */
+function channelAlertLabel(registry, config, channel) {
+  const number = pluginConfigNumber(channel.plugin_code);
+  const name = pluginDisplayName(registry, config, channel.plugin_code);
+  return `#${channel.id} ${channel.name}（${name} · 配置 ${number}）`;
+}
+
+/**
+ * 监听器掉线会影响哪几条通道。
+ *
+ * Watcher 声明的能力是基础编码，但同一个平台可能挂着好几份配置、好几条通道，
+ * 它们会一起停摆。只报插件编码的话，管理员还得自己回去数哪几条通道用了它。
+ */
+async function channelsAffectedByPlugins(env, basePlugins) {
+  const wanted = new Set(basePlugins.map((code) => basePluginCode(code)));
+  if (!wanted.size) return [];
+  const { registry } = runtimeOf(env);
+  const [channels, config] = await Promise.all([runtimeChannels(env), runtimePluginConfig(env)]);
+  return channels
+    .filter((channel) => channel.enabled && wanted.has(basePluginCode(channel.plugin_code)))
+    .map((channel) => channelAlertLabel(registry, config, channel));
 }
 
 /**
@@ -1510,12 +1554,15 @@ async function checkWatcherLiveness(env, now = Date.now()) {
   const secret = settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '');
   for (const item of stale) {
     const minutes = Math.round(item.silentMs / 60_000);
+    const affected = await channelsAffectedByPlugins(env, item.plugins).catch(() => []);
     await emitAlert(env, {
       event: `watcher_offline:${item.key}`,
       level: 'critical',
       title: 'EdgePay 监听器掉线',
-      message: `监听器已 ${minutes} 分钟没有上报，受影响的插件：${item.plugins.join('、') || '未知'}。`
-        + '这期间对应通道的到账不会被确认。',
+      message: `监听器已 ${minutes} 分钟没有上报，这期间以下通道的到账不会被确认：\n`
+        + (affected.length
+          ? affected.join('\n')
+          : `（暂无启用中的通道）受影响的插件：${item.plugins.join('、') || '未知'}`),
     }, { secret, now });
   }
   // 恢复销案：还在线的实例，把它上一次掉线的静默期清掉，下次再掉能立刻告警。
