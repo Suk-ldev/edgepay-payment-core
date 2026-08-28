@@ -51,8 +51,12 @@ import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertCo
 import { pluginContext } from './plugin-context.js';
 import { runtimeOf, withRuntime } from './runtime-env.js';
 import {
-  adminPluginForms, configForPlugin, missingPluginFields, pluginEnabled, publicPluginList,
+  INSTANCE_NAME_KEY, adminPluginForms, configForPlugin, missingPluginFields, pluginCodesWithInstances,
+  pluginDisplayName, pluginEnabled, publicPluginList,
 } from './plugin-config.js';
+import {
+  basePluginCode, isPluginInstanceCode, nextInstanceSequence, pluginInstanceCode,
+} from '../plugin-instances.js';
 
 // 插件要额外带给 Watcher / 轮询器的收款信息统一放在订单 metadata 的这个键下。
 const WATCHER_RECEIPT_KEY = 'receipt_watcher';
@@ -189,14 +193,22 @@ async function runtimeChannels(env) {
 async function licensedCodes(env) {
   const runtime = runtimeOf(env);
   const state = await runtime.license.state(env, runtime.registry);
-  return new Set(state.plugins.filter((code) => runtime.registry.has(code)));
+  return new Set(state.plugins.filter((code) => runtime.registry.hasBase(code)));
+}
+
+/**
+ * 权益按平台算，不按账号算：买了某个插件，它的副本不需要再买一次。
+ * License 权益列表里只有基础编码，所以比对前先把副本编码折回去。
+ */
+function licenseCovers(licensed, pluginCode) {
+  return licensed.has(basePluginCode(pluginCode));
 }
 
 async function routableChannels(env) {
   const [channels, config, licensed] = await Promise.all([
     runtimeChannels(env), runtimePluginConfig(env), licensedCodes(env),
   ]);
-  return channels.filter((channel) => licensed.has(channel.plugin_code)
+  return channels.filter((channel) => licenseCovers(licensed, channel.plugin_code)
     && pluginEnabled(runtimeOf(env).registry, config, channel.plugin_code));
 }
 
@@ -1145,7 +1157,8 @@ async function receiptWatcherAccounts(env) {
   const [pluginConfig, licensed] = await Promise.all([runtimePluginConfig(env), licensedCodes(env)]);
   const channels = (await runtimeChannels(env)).filter((channel) => {
     const plugin = registry.get(channel.plugin_code);
-    return channel.enabled && plugin?.manifest.mode === 'channel-notify' && licensed.has(channel.plugin_code)
+    return channel.enabled && plugin?.manifest.mode === 'channel-notify'
+      && licenseCovers(licensed, channel.plugin_code)
       && pluginEnabled(registry, pluginConfig, channel.plugin_code);
   });
   if (!channels.length) return [];
@@ -1155,17 +1168,21 @@ async function receiptWatcherAccounts(env) {
   const graceCutoff = new Date(Date.now() - (maxGrace * 1_000)).toISOString();
   const pluginCodes = [...new Set(channels.map((channel) => channel.plugin_code))];
   const placeholders = pluginCodes.map(() => '?').join(',');
+  // 声明了确认宽限期的插件（链上转账要等区块确认）连刚过期的订单也要一起交出去。
+  // 按清单挑，不认编码——插件副本的编码不是 `usdt_trc20_receipt`，硬编码会漏掉它们。
+  const graceCodes = pluginCodes.filter((code) => registry.require(code).manifest.receiptGraceSeconds > 0);
+  const graceClause = graceCodes.length ? `OR (
+      plugin_code IN (${graceCodes.map(() => '?').join(',')})
+      AND status IN ('PAYING', 'EXPIRED')
+      AND expires_at > ?
+    )` : '';
   const { results } = await env.DB.prepare(`
     SELECT * FROM payment_attempts
     WHERE (
       plugin_code IN (${placeholders}) AND status = 'PAYING' AND expires_at > ?
-    ) OR (
-      plugin_code = 'usdt_trc20_receipt'
-      AND status IN ('PAYING', 'EXPIRED')
-      AND expires_at > ?
-    )
+    ) ${graceClause}
     ORDER BY created_at ASC
-  `).bind(...pluginCodes, now, graceCutoff).all();
+  `).bind(...pluginCodes, now, ...(graceCodes.length ? [...graceCodes, graceCutoff] : [])).all();
   const groupedChannels = [...channels.reduce((groups, channel) => {
     if (!groups.has(channel.plugin_code)) groups.set(channel.plugin_code, []);
     groups.get(channel.plugin_code).push(channel);
@@ -1256,7 +1273,7 @@ async function receiptWatcherDiscoveries(env, supported) {
   for (const row of results) {
     const job = parseJson(String(row.value_text ?? ''));
     const pluginCode = String(job.plugin_code ?? '');
-    if (job.status !== 'pending' || !supported.has(pluginCode)
+    if (job.status !== 'pending' || !supported.has(basePluginCode(pluginCode))
       || Date.parse(String(job.expires_at ?? '')) <= Date.now()) continue;
     const running = { ...job, status: 'running', started_at: timestamp() };
     const nextValue = JSON.stringify(running);
@@ -1280,11 +1297,13 @@ async function watcherSnapshot(request, env) {
     env.WATCHER_PREVIOUS_TRANSPORT_SECRET,
   ].filter(Boolean).map(String);
   if (!await verifyWatcherSnapshotRequest(request, transportSecrets)) return unauthorized();
-  const knownCodes = new Set(runtimeOf(env).registry.codes());
+  // Watcher 声明的是"我会查哪些平台"，永远是基础编码；副本由同一个监听插件接管，
+  // 所以下面按基础编码把副本账号一并派给它。
+  const { registry } = runtimeOf(env);
   const capabilities = [...new Set(String(request.headers.get('x-edgepay-watcher-plugins') ?? '')
     .split(',')
     .map((value) => value.trim())
-    .filter((value) => knownCodes.has(value)))].sort();
+    .filter((value) => registry.hasBase(value)))].sort();
   // 每个 Watcher 实例各写各的行，读的时候取并集：同时跑两个 Watcher 时
   // 不会再互相把对方声明的插件冲掉。详见 watcher-presence.js。
   await recordWatcherPresence(
@@ -1294,7 +1313,8 @@ async function watcherSnapshot(request, env) {
   );
   const supported = new Set(capabilities);
   const [accounts, discoveries] = await Promise.all([
-    receiptWatcherAccounts(env).then((items) => items.filter((account) => supported.has(account.plugin_code))),
+    receiptWatcherAccounts(env)
+      .then((items) => items.filter((account) => supported.has(basePluginCode(account.plugin_code)))),
     receiptWatcherDiscoveries(env, supported),
   ]);
   return jsonResponse(
@@ -1666,7 +1686,7 @@ async function runReceiptPoll(env, ctx, trigger = 'scheduled', workerOnly = fals
       };
     }
     if (workerPollerAvailable(runtimeOf(env).registry, account.plugin_code, account.config)
-      && watcherPlugins.has(account.plugin_code)) {
+      && watcherPlugins.has(basePluginCode(account.plugin_code))) {
       return {
         plugin_code: account.plugin_code,
         plugin_name: plugin.manifest.name,
@@ -1927,7 +1947,7 @@ async function channelNotify(request, env, ctx, channelId) {
   const channel = channelById(await runtimeChannels(env), channelId);
   const plugin = channel ? pluginOrNull(env, channel.plugin_code) : null;
   if (!channel || !plugin) return new Response('fail', { status: 404 });
-  if (!(await licensedCodes(env)).has(plugin.manifest.code)) return new Response('fail', { status: 403 });
+  if (!licenseCovers(await licensedCodes(env), plugin.manifest.code)) return new Response('fail', { status: 403 });
   const config = await runtimePluginConfig(env);
   const pluginConfig = configForPlugin(config, plugin.manifest.code);
   if (plugin.manifest.receiptSource === 'sms_forwarder') {
@@ -2594,7 +2614,7 @@ async function pluginConfigPayload(env) {
     .filter((code) => !registry.has(code))
     .map((code) => ({ code, name: license.pluginNames?.[code] ?? code }));
   const results = publicPluginList(registry, config)
-    .map((plugin) => ({ ...plugin, licensed: licensed.has(plugin.code), installed: true }));
+    .map((plugin) => ({ ...plugin, licensed: licenseCovers(licensed, plugin.code), installed: true }));
   const resultCodes = new Set(results.map((plugin) => plugin.code));
   for (const item of Array.isArray(license.catalog) ? license.catalog : []) {
     const code = String(item?.code ?? '').trim();
@@ -2605,7 +2625,7 @@ async function pluginConfigPayload(env) {
   return {
     results,
     forms: adminPluginForms(registry, config)
-      .filter((form) => licensed.has(form.code))
+      .filter((form) => licenseCovers(licensed, form.code))
       .map((form) => ({ ...form, licensed: true })),
     storage: 'D1 AES-GCM / CONFIG_ENCRYPTION_KEY',
     license,
@@ -2645,6 +2665,149 @@ function invalidatePluginListCache(env) {
   pluginListCache.delete(runtimeOf(env));
 }
 
+function assertInstanceName(value) {
+  const name = String(value ?? '').trim();
+  if (name.length > 40) throw new Error('插件副本名称不能超过 40 个字');
+  return name;
+}
+
+/**
+ * 复制一份插件配置给副本用。
+ *
+ * 密钥和收款码永远不复制：副本的意义就是换一个账号收款，把原账号的投递密钥或
+ * 收款二维码带过去，轻则两个通道抢同一笔到账，重则钱进了不该进的那个账号。
+ * 剩下的字段（轮询间隔、图鉴之类）复制过去能省几次填写。
+ */
+function copyableInstanceConfig(plugin, sourceConfig) {
+  const copied = {};
+  for (const field of plugin.manifest.adminFields) {
+    if (field.secret || field.type === 'image') continue;
+    if (!(field.key in sourceConfig)) continue;
+    copied[field.key] = sourceConfig[field.key];
+  }
+  return copied;
+}
+
+/** 复制插件：给同一个平台再开一个账号位，可以顺带建好它自己的通道。 */
+async function duplicatePluginApi(request, env) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'POST') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    const body = await adminJsonBody(request);
+    const { registry } = runtimeOf(env);
+    const sourceCode = String(body.plugin_code ?? '').trim();
+    const source = registry.get(sourceCode);
+    if (!source) throw new Error('插件不存在');
+    const baseCode = basePluginCode(source.manifest.code);
+    if (!licenseCovers(await licensedCodes(env), baseCode)) {
+      return jsonResponse({ ok: false, error: '该插件尚未购买，请先前往 License 站购买' }, 403);
+    }
+    const config = await runtimePluginConfig(env);
+    const instanceCode = pluginInstanceCode(
+      baseCode,
+      nextInstanceSequence(baseCode, pluginCodesWithInstances(registry, config)),
+    );
+    const instance = registry.require(instanceCode);
+    const instanceConfig = body.copy_config === true
+      ? copyableInstanceConfig(instance, configForPlugin(config, sourceCode))
+      : {};
+    instanceConfig[INSTANCE_NAME_KEY] = assertInstanceName(body.name) || instance.manifest.name;
+    // 副本一定缺配置（至少缺密钥），先停用；配置齐了再由管理员打开。
+    instanceConfig.enabled = false;
+    config[instanceCode] = instanceConfig;
+    await writeEncryptedJsonSetting(env, 'plugin_config', settingsEncryptionSecret(env), config);
+    invalidatePluginListCache(env);
+
+    let channel = null;
+    if (body.channel && typeof body.channel === 'object') {
+      channel = await appendPluginInstanceChannel(env, instance, body.channel, instanceConfig);
+    }
+    return jsonResponse({
+      ok: true,
+      plugin_code: instanceCode,
+      message: channel
+        ? `已复制为「${instanceConfig[INSTANCE_NAME_KEY]}」，并新建通道 #${channel.id}；补齐配置后启用即可收款。`
+        : `已复制为「${instanceConfig[INSTANCE_NAME_KEY]}」；补齐配置后启用即可收款。`,
+      channel,
+      form: adminPluginForms(registry, config).find((form) => form.code === instanceCode),
+      plugin: publicPluginList(registry, config).find((item) => item.code === instanceCode),
+    });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
+/**
+ * 给刚建好的副本追加一条自己的通道。
+ *
+ * 通道是分流的单位：两个账号各一条通道、各自权重，收款就按权重在两个账号之间走。
+ * 所以复制插件时顺手把通道建出来，省得再去通道页手动配一遍。
+ */
+async function appendPluginInstanceChannel(env, instance, input, instanceConfig) {
+  const { registry } = runtimeOf(env);
+  const existing = await runtimeChannels(env);
+  const payType = String(input.pay_type ?? '').trim().toLowerCase();
+  if (!instance.manifest.payTypes.includes(payType)) {
+    throw new Error(`${instance.manifest.name}不支持支付方式：${payType || '（空）'}`);
+  }
+  const created = {
+    id: Math.max(0, ...existing.map((channel) => Number(channel.id) || 0)) + 1,
+    name: String(input.name ?? '').trim()
+      || `${instanceConfig[INSTANCE_NAME_KEY]} · ${payType}`,
+    plugin_code: instance.manifest.code,
+    pay_types: [payType],
+    weight: input.weight === undefined || input.weight === '' ? 100 : Number(input.weight),
+    // 插件还没配好就先别接单；通道页可以随时打开。
+    enabled: false,
+    sort: Math.max(-1, ...existing.map((channel) => Number(channel.sort) || 0)) + 1,
+    ...(input.order_expire_minutes === undefined || String(input.order_expire_minutes).trim() === ''
+      ? {}
+      : { order_expire_minutes: Number(input.order_expire_minutes) }),
+  };
+  const normalized = parseChannels(registry, [...existing, created]);
+  await writePlainJsonSetting(env, 'channels', normalized);
+  return normalized.find((channel) => channel.id === created.id) ?? null;
+}
+
+/** 删除插件副本。基础插件删不掉——它是构建的一部分，不是配置。 */
+async function deletePluginInstanceApi(request, env, pluginCode) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'DELETE') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    const body = await adminJsonBody(request);
+    if (body.confirm !== true) throw new Error('删除插件副本需要明确确认');
+    if (!isPluginInstanceCode(pluginCode)) throw new Error('只能删除插件副本');
+    const { registry } = runtimeOf(env);
+    const config = await runtimePluginConfig(env);
+    if (!(pluginCode in config)) return jsonResponse({ ok: false, error: '插件副本不存在' }, 404);
+    const name = pluginDisplayName(registry, config, pluginCode);
+    // 通道离了插件就是条死路由，跟着一起删；历史订单照旧保留。
+    const channels = await runtimeChannels(env);
+    const removedChannels = channels.filter((channel) => channel.plugin_code === pluginCode);
+    if (removedChannels.length) {
+      await writePlainJsonSetting(
+        env,
+        'channels',
+        channels.filter((channel) => channel.plugin_code !== pluginCode),
+      );
+    }
+    delete config[pluginCode];
+    await writeEncryptedJsonSetting(env, 'plugin_config', settingsEncryptionSecret(env), config);
+    invalidatePluginListCache(env);
+    return jsonResponse({
+      ok: true,
+      message: removedChannels.length
+        ? `已删除「${name}」及其 ${removedChannels.length} 条通道，历史订单仍保留`
+        : `已删除「${name}」`,
+      removed_channels: removedChannels.map((channel) => channel.id),
+    });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, 400);
+  }
+}
+
 async function pluginConfigApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method === 'GET') {
@@ -2660,15 +2823,24 @@ async function pluginConfigApi(request, env) {
     const { registry } = runtimeOf(env);
     const plugin = registry.get(String(body.plugin_code ?? ''));
     if (!plugin) throw new Error('插件不存在');
-    if (!(await licensedCodes(env)).has(plugin.manifest.code)) {
+    if (!licenseCovers(await licensedCodes(env), plugin.manifest.code)) {
       return jsonResponse({ ok: false, error: '该插件尚未购买，请先前往 License 站购买' }, 403);
     }
     const values = body.values;
     const hasValues = values && typeof values === 'object' && !Array.isArray(values);
     const hasEnabled = typeof body.enabled === 'boolean';
-    if (!hasValues && !hasEnabled) throw new Error('没有可保存的插件配置');
+    const hasInstanceName = typeof body.instance_name === 'string';
+    if (!hasValues && !hasEnabled && !hasInstanceName) throw new Error('没有可保存的插件配置');
     const config = await runtimePluginConfig(env);
+    // 副本的存在性由配置说了算。编码是能猜出来的，不该靠猜就凭空多出一个账号位。
+    if (isPluginInstanceCode(plugin.manifest.code) && !(plugin.manifest.code in config)) {
+      throw new Error('插件副本不存在，请先在插件列表里复制一个');
+    }
     const current = { ...configForPlugin(config, plugin.manifest.code) };
+    if (hasInstanceName) {
+      if (!isPluginInstanceCode(plugin.manifest.code)) throw new Error('只有插件副本可以改名');
+      current[INSTANCE_NAME_KEY] = assertInstanceName(body.instance_name);
+    }
     if (hasValues) {
       for (const field of plugin.manifest.adminFields) {
         if (!(field.key in values)) continue;
@@ -2719,7 +2891,7 @@ async function pluginReceiptDiscoveryApi(request, env, pluginCode) {
     const runtime = runtimeOf(env);
     const plugin = runtime.registry.get(pluginCode);
     if (!plugin || !receiptDiscoveryAvailable(plugin.manifest)) throw new Error('该插件不需要查询收款终端信息');
-    if (!(await licensedCodes(env)).has(pluginCode)) {
+    if (!licenseCovers(await licensedCodes(env), pluginCode)) {
       return jsonResponse({ ok: false, error: '该插件尚未购买' }, 403);
     }
     if (request.method === 'GET') {
@@ -2745,7 +2917,7 @@ async function pluginReceiptDiscoveryApi(request, env, pluginCode) {
         records: sanitizeReceiptDiscoveryRecords(result.records),
       });
     }
-    if (!(await onlineWatcherPlugins(env)).has(pluginCode)) {
+    if (!(await onlineWatcherPlugins(env)).has(basePluginCode(pluginCode))) {
       throw new Error('该插件需要 Docker Watcher 查询；请先启动并确认 Watcher 已在线');
     }
     const requestId = crypto.randomUUID();
@@ -2838,20 +3010,30 @@ async function adminChannelData(env, channels = null) {
     licensedCodes(env),
   ]);
   return {
-    results: resolvedChannels.filter((channel) => licensed.has(channel.plugin_code)).map((channel) => {
+    results: resolvedChannels.filter((channel) => licenseCovers(licensed, channel.plugin_code)).map((channel) => {
       const plugin = pluginOrNull(env, channel.plugin_code);
       return {
         ...channel,
         available_pay_types: [...(plugin?.manifest.payTypes ?? [])],
+        // 通道页要一眼看得出这条路由挂在哪个账号上，光有编码不够。
+        plugin_name: pluginDisplayName(runtimeOf(env).registry, config, channel.plugin_code),
         plugin_enabled: pluginEnabled(runtimeOf(env).registry, config, channel.plugin_code),
       };
     }),
-    plugins: runtimeOf(env).registry.manifests().filter((plugin) => licensed.has(plugin.code)).map((plugin) => ({
-      code: plugin.code,
-      name: plugin.name,
-      pay_types: [...plugin.payTypes],
-      enabled: pluginEnabled(runtimeOf(env).registry, config, plugin.code),
-    })),
+    // 副本也要出现在这份列表里：新增通道时得能挑到"微信个人收款监听 2"。
+    plugins: pluginCodesWithInstances(runtimeOf(env).registry, config)
+      .filter((code) => licenseCovers(licensed, code))
+      .map((code) => {
+        const { manifest } = runtimeOf(env).registry.get(code);
+        return {
+          code,
+          name: pluginDisplayName(runtimeOf(env).registry, config, code),
+          base_code: manifest.baseCode ?? code,
+          instance_sequence: manifest.instanceSequence ?? 1,
+          pay_types: [...manifest.payTypes],
+          enabled: pluginEnabled(runtimeOf(env).registry, config, code),
+        };
+      }),
   };
 }
 
@@ -2864,8 +3046,16 @@ async function channelsApi(request, env) {
     const body = await adminJsonBody(request);
     if (!Array.isArray(body.channels)) throw new Error('通道配置必须是数组');
     const normalized = parseChannels(runtimeOf(env).registry, body.channels);
+    // 副本编码是能猜出来的，但没建过的副本没有配置，指过去只会得到一条永远收不了款的通道。
+    const config = await runtimePluginConfig(env);
+    const missingInstance = normalized.find((channel) => (
+      isPluginInstanceCode(channel.plugin_code) && !(channel.plugin_code in config)
+    ));
+    if (missingInstance) {
+      throw new Error(`通道 #${missingInstance.id} 指向的插件副本不存在，请先在插件列表里复制一个`);
+    }
     const licensed = await licensedCodes(env);
-    const unlicensed = normalized.find((channel) => !licensed.has(channel.plugin_code));
+    const unlicensed = normalized.find((channel) => !licenseCovers(licensed, channel.plugin_code));
     if (unlicensed) {
       const name = pluginOrNull(env, unlicensed.plugin_code)?.manifest.name ?? unlicensed.plugin_code;
       return jsonResponse({ ok: false, error: `${name}尚未购买` }, 403);
@@ -2905,7 +3095,7 @@ async function channelTestRecordsApi(request, env, channelId) {
   await expireDuePayments(env);
   const channel = channelById(await runtimeChannels(env), channelId);
   if (!channel) return jsonResponse({ ok: false, error: '支付通道不存在' }, 404);
-  if (!(await licensedCodes(env)).has(channel.plugin_code)) {
+  if (!licenseCovers(await licensedCodes(env), channel.plugin_code)) {
     return jsonResponse({ ok: false, error: '该通道插件尚未购买' }, 403);
   }
   const limit = Math.min(20, Math.max(1, Number(new URL(request.url).searchParams.get('limit') ?? 8)));
@@ -2933,7 +3123,7 @@ async function channelTestApi(request, env, channelId) {
     assertAdminMutationRequest(request);
     const channel = channelById(await runtimeChannels(env), channelId);
     if (!channel) throw new Error('支付通道不存在');
-    if (!(await licensedCodes(env)).has(channel.plugin_code)) {
+    if (!licenseCovers(await licensedCodes(env), channel.plugin_code)) {
       return jsonResponse({ ok: false, error: '该通道插件尚未购买' }, 403);
     }
     const body = await adminJsonBody(request);
@@ -3122,11 +3312,18 @@ async function route(request, env, ctx) {
   if (adminOrderActionMatch) {
     return orderActionApi(request, env, ctx, adminOrderActionMatch[1], adminOrderActionMatch[2]);
   }
-  const adminPluginDiscoveryMatch = pathname.match(/^\/admin\/api\/plugins\/([a-z][a-z0-9_]*)\/recent-receipts$/u);
+  const adminPluginDiscoveryMatch = pathname.match(/^\/admin\/api\/plugins\/([a-z][a-z0-9_~]*)\/recent-receipts$/u);
   if (adminPluginDiscoveryMatch && ['GET', 'POST'].includes(request.method)) {
     return pluginReceiptDiscoveryApi(request, env, adminPluginDiscoveryMatch[1]);
   }
   if (pathname === '/admin/api/plugins' && ['GET', 'PUT'].includes(request.method)) return pluginConfigApi(request, env);
+  if (pathname === '/admin/api/plugins/duplicate' && request.method === 'POST') {
+    return duplicatePluginApi(request, env);
+  }
+  const adminPluginInstanceMatch = pathname.match(/^\/admin\/api\/plugins\/([a-z][a-z0-9_]*~[0-9]{1,2})$/u);
+  if (adminPluginInstanceMatch && request.method === 'DELETE') {
+    return deletePluginInstanceApi(request, env, adminPluginInstanceMatch[1]);
+  }
   if (pathname === '/admin/api/license' && request.method === 'GET') return licenseStatusApi(request, env);
   if (pathname === '/admin/api/version' && request.method === 'GET') return adminVersionApi(request, env);
   if (pathname === '/admin/api/site' && ['GET', 'PUT'].includes(request.method)) return siteConfigApi(request, env);

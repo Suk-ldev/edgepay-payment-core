@@ -21,6 +21,8 @@ const orderDetailDialog = document.querySelector('#order-detail-dialog');
 const orderDetailBody = document.querySelector('#order-detail-body');
 const orderActionDialog = document.querySelector('#order-action-dialog');
 const orderActionForm = document.querySelector('#order-action-form');
+const pluginDuplicateDialog = document.querySelector('#plugin-duplicate-dialog');
+const pluginDuplicateForm = document.querySelector('#plugin-duplicate-form');
 const channelCreateDialog = document.querySelector('#channel-create-dialog');
 const channelCreateForm = document.querySelector('#channel-create-form');
 const channelTestDialog = document.querySelector('#channel-test-dialog');
@@ -41,6 +43,7 @@ let pluginForms = [];
 let pluginsState = [];
 let channelsState = [];
 let channelPluginsState = [];
+let duplicateSourceCode = '';
 let ordersState = [];
 let orderPagination = { total: 0, page: 1, pageSize: 20, pageCount: 0 };
 const orderQuery = {
@@ -83,6 +86,13 @@ function text(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+/** 插件副本编码（`wxpay_receipt~2`）对应的基础插件编码。 */
+function basePluginCode(code) {
+  const value = String(code ?? '');
+  const separator = value.indexOf('~');
+  return separator === -1 ? value : value.slice(0, separator);
 }
 
 function modeName(plugin) {
@@ -256,7 +266,7 @@ function renderPlugins(plugins = pluginsState) {
     return matchesKeyword && matchesStatus;
   });
   pluginBody.innerHTML = filtered.length ? filtered.map((plugin) => `<tr class="${plugin.licensed ? '' : 'ui-plugin-unlicensed'}">
-    <td><strong>${text(plugin.name)}</strong><small>${text(plugin.code)}</small></td>
+    <td><strong>${text(plugin.name)}</strong>${Number(plugin.instance_sequence ?? 1) > 1 ? '<span class="ui-test-order-tag">副本</span>' : ''}<small>${text(plugin.code)}</small></td>
     <td>${text((Array.isArray(plugin.payTypes) ? plugin.payTypes : []).join(' / ') || '购买后显示')}</td>
     <td>${text(modeName(plugin))}</td>
     <td>${plugin.licensed ? `
@@ -268,7 +278,11 @@ function renderPlugins(plugins = pluginsState) {
     ` : '<span class="ui-state missing">未购买</span><small>购买后才会开放配置和启用操作</small>'}</td>
     <td class="ui-description">${text(plugin.note)}</td>
     <td>${plugin.licensed
-      ? `<button class="ui-row-action" type="button" data-edit-plugin="${text(plugin.code)}">配置</button>`
+      ? `<div class="ui-channel-actions">
+        <button class="ui-row-action" type="button" data-edit-plugin="${text(plugin.code)}">配置</button>
+        <button class="ui-row-action" type="button" data-duplicate-plugin="${text(plugin.code)}">复制</button>
+        ${Number(plugin.instance_sequence ?? 1) > 1 ? `<button class="ui-row-action ui-row-action-danger" type="button" data-delete-plugin="${text(plugin.code)}">删除副本</button>` : ''}
+      </div>`
       : `<a class="ui-row-action" href="${licensePurchaseUrl}" target="_blank" rel="noopener">购买</a>`}</td>
   </tr>`).join('') : '<tr><td class="ui-empty" colspan="6">没有符合条件的插件</td></tr>';
 }
@@ -346,7 +360,7 @@ function renderChannels(channels) {
   channelBody.innerHTML = channels.map((channel) => `<tr data-channel-id="${text(channel.id)}">
     <td><strong>#${text(channel.id)}</strong></td>
     <td>${text(channel.name)}</td>
-    <td><small>${text(channel.plugin_code)}</small></td>
+    <td><strong>${text(channel.plugin_name ?? channel.plugin_code)}</strong><small>${text(channel.plugin_code)}</small></td>
     <td><label class="ui-inline-field ui-channel-pay-type-field"><span class="sr-only">通道 ${text(channel.id)} 支付方式</span><select class="channel-pay-type">${(channel.available_pay_types ?? channel.pay_types).map((payType) => `<option value="${text(payType)}" ${channel.pay_types[0] === payType ? 'selected' : ''}>${text(payType)}</option>`).join('')}</select></label></td>
     <td><label class="ui-inline-field"><span class="sr-only">通道 ${text(channel.id)} 权重</span><input class="channel-weight" type="number" min="0" max="100000" step="1" value="${text(channel.weight)}" /></label><small>相同类型按权重随机</small></td>
     <td><label class="ui-inline-field ui-inline-field--expire"><span class="sr-only">通道 ${text(channel.id)} 订单有效期</span><input class="channel-expire" type="number" min="1" max="1440" step="1" value="${channel.order_expire_minutes == null ? '' : text(channel.order_expire_minutes)}" placeholder="继承全局" /></label><small>${channel.order_expire_minutes == null ? '继承收银台设置' : '分钟'}</small></td>
@@ -459,6 +473,7 @@ function applyChannelFilters() {
       channel.id,
       channel.name,
       channel.plugin_code,
+      channel.plugin_name ?? '',
       ...(channel.pay_types ?? []),
     ].some((value) => String(value).toLowerCase().includes(keyword));
     const matchesStatus = !channelQuery.status
@@ -501,7 +516,7 @@ async function loadChannelTestRecords(channelId) {
 }
 
 function syncChannelTestProductFields() {
-  const isWechat = activeTestChannel?.plugin_code === 'wechat_api';
+  const isWechat = basePluginCode(activeTestChannel?.plugin_code) === 'wechat_api';
   const wechatProduct = document.querySelector('#channel-test-wechat-product').value;
   document.querySelector('#channel-test-wechat-product-field').hidden = !isWechat;
   document.querySelector('#channel-test-wechat-openid-field').hidden = !isWechat
@@ -509,7 +524,7 @@ function syncChannelTestProductFields() {
   document.querySelector('#channel-test-wechat-mini-openid-field').hidden = !isWechat
     || wechatProduct !== 'mini';
 
-  const isAlipay = activeTestChannel?.plugin_code === 'alipay_api';
+  const isAlipay = basePluginCode(activeTestChannel?.plugin_code) === 'alipay_api';
   const alipayProduct = document.querySelector('#channel-test-alipay-product').value;
   document.querySelector('#channel-test-alipay-product-field').hidden = !isAlipay;
   document.querySelector('#channel-test-alipay-auth-code-field').hidden = !isAlipay
@@ -1136,7 +1151,11 @@ function openPluginEditor(pluginCode) {
   if (!form) return;
   activePluginCode = pluginCode;
   document.querySelector('#plugin-editor-title').textContent = `编辑 ${form.name}`;
-  pluginFields.innerHTML = form.fields.map(fieldMarkup).join('');
+  // 副本可以改个一眼认得出是哪个账号的名字；基础插件的名字跟着构建走，不给改。
+  const instanceNameField = Number(form.instance_sequence ?? 1) > 1
+    ? `<label class="ui-config-field ui-config-wide" for="plugin-instance-name"><span>副本名称</span><input id="plugin-instance-name" name="__instance_name" type="text" maxlength="40" value="${text(form.instance_name || form.name)}" /><small>只改后台显示，通道和历史订单不受影响。</small></label>`
+    : '';
+  pluginFields.innerHTML = instanceNameField + form.fields.map(fieldMarkup).join('');
   resetReceiptDiscovery(form);
   pluginEditor.hidden = false;
   pluginEditor.classList.remove('entering');
@@ -1163,9 +1182,14 @@ async function savePlugin(event) {
   button.disabled = true;
   button.textContent = '正在保存…';
   try {
+    const instanceName = pluginForm.elements.namedItem('__instance_name');
     const response = await request('/admin/api/plugins', {
       method: 'PUT',
-      body: JSON.stringify({ plugin_code: activePluginCode, values }),
+      body: JSON.stringify({
+        plugin_code: activePluginCode,
+        values,
+        ...(instanceName ? { instance_name: instanceName.value } : {}),
+      }),
     });
     pluginForms = pluginForms.map((candidate) => candidate.code === activePluginCode ? response.form : candidate);
     showNotice(`${response.form.name} 配置已保存`);
@@ -1176,6 +1200,71 @@ async function savePlugin(event) {
   } finally {
     button.disabled = false;
     button.textContent = '保存插件配置';
+  }
+}
+
+function openPluginDuplicate(pluginCode) {
+  const plugin = pluginsState.find((candidate) => candidate.code === pluginCode);
+  if (!plugin) return;
+  duplicateSourceCode = pluginCode;
+  const payTypes = Array.isArray(plugin.payTypes) ? plugin.payTypes : [];
+  pluginDuplicateForm.reset();
+  document.querySelector('#plugin-duplicate-source').textContent = `从「${plugin.name}」复制一个账号位。副本和它的通道都会先停用，配置齐了再启用。`;
+  document.querySelector('#plugin-duplicate-name').value = `${plugin.base_name ?? plugin.name} ${Number(plugin.instance_sequence ?? 1) + 1}`;
+  document.querySelector('#plugin-duplicate-pay-type').innerHTML = ['<option value="">暂不新建</option>']
+    .concat(payTypes.map((payType) => `<option value="${text(payType)}">${text(payType)}</option>`))
+    .join('');
+  document.querySelector('#plugin-duplicate-pay-type').value = payTypes[0] ?? '';
+  document.querySelector('#plugin-duplicate-weight').value = '100';
+  pluginDuplicateDialog.showModal();
+  requestAnimationFrame(() => document.querySelector('#plugin-duplicate-name').focus());
+}
+
+async function duplicatePlugin(event) {
+  event.preventDefault();
+  const data = new FormData(pluginDuplicateForm);
+  const payType = String(data.get('pay_type') ?? '').trim();
+  const button = document.querySelector('#plugin-duplicate-submit');
+  button.disabled = true;
+  button.textContent = '正在复制…';
+  try {
+    const response = await request('/admin/api/plugins/duplicate', {
+      method: 'POST',
+      body: JSON.stringify({
+        plugin_code: duplicateSourceCode,
+        name: String(data.get('name') ?? '').trim(),
+        copy_config: data.get('copy_config') === 'on',
+        ...(payType ? { channel: { pay_type: payType, weight: Number(data.get('weight')) } } : {}),
+      }),
+    });
+    pluginDuplicateDialog.close();
+    await load();
+    showNotice(response.message);
+    openPluginEditor(response.plugin_code);
+  } catch (error) {
+    showNotice(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = '复制插件';
+  }
+}
+
+async function deletePluginInstance(pluginCode, button) {
+  const plugin = pluginsState.find((candidate) => candidate.code === pluginCode);
+  const name = plugin?.name ?? pluginCode;
+  if (!confirm(`确认删除插件副本「${name}」？\n\n它的配置和通道都会一并删除；历史订单不会删除。`)) return;
+  button.disabled = true;
+  try {
+    const response = await request(`/admin/api/plugins/${encodeURIComponent(pluginCode)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ confirm: true }),
+    });
+    if (activePluginCode === pluginCode) closePluginEditor();
+    await load();
+    showNotice(response.message);
+  } catch (error) {
+    button.disabled = false;
+    showNotice(error.message, 'error');
   }
 }
 
@@ -1380,8 +1469,18 @@ async function load({ keepEditor = false } = {}) {
 }
 
 pluginBody.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-edit-plugin]');
-  if (button) openPluginEditor(button.dataset.editPlugin);
+  const edit = event.target.closest('[data-edit-plugin]');
+  if (edit) {
+    openPluginEditor(edit.dataset.editPlugin);
+    return;
+  }
+  const duplicate = event.target.closest('[data-duplicate-plugin]');
+  if (duplicate) {
+    openPluginDuplicate(duplicate.dataset.duplicatePlugin);
+    return;
+  }
+  const remove = event.target.closest('[data-delete-plugin]');
+  if (remove) deletePluginInstance(remove.dataset.deletePlugin, remove);
 });
 pluginBody.addEventListener('change', (event) => {
   const input = event.target.closest('[data-toggle-plugin]');
@@ -1570,6 +1669,10 @@ pluginForm.addEventListener('submit', savePlugin);
 siteForm.addEventListener('submit', saveSiteConfig);
 channelTestForm.addEventListener('submit', createChannelTest);
 channelCreateForm.addEventListener('submit', createChannel);
+pluginDuplicateForm.addEventListener('submit', duplicatePlugin);
+for (const button of document.querySelectorAll('[data-close-plugin-duplicate]')) {
+  button.addEventListener('click', () => pluginDuplicateDialog.close());
+}
 document.querySelector('#open-channel-create').addEventListener('click', openChannelCreate);
 document.querySelector('#channel-create-plugin').addEventListener('change', () => {
   document.querySelector('#channel-create-name').value = '';

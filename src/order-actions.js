@@ -3,6 +3,7 @@ import { configForPlugin } from './core/plugin-config.js';
 import { pluginContext } from './core/plugin-context.js';
 import { registryOf, runtimeOf, tryRuntimeOf } from './core/runtime-env.js';
 import { unsupportedHook } from './plugin-api.js';
+import { PLUGIN_CODE_RE, basePluginCode } from './plugin-instances.js';
 import { dispatchDueNotifications, enqueuePaymentNotification } from './notifications.js';
 
 const ACTION_META = Object.freeze({
@@ -50,7 +51,6 @@ const LISTENER_SOURCE_LABELS = Object.freeze({
 
 const RESERVING_REFUND_STATUSES = ['CREATED', 'PROCESSING', 'SUCCEEDED'];
 const MANUAL_SUCCESS_STATUSES = ['PENDING', 'PAYING', 'FAILED', 'CLOSED', 'EXPIRED'];
-const PLUGIN_CODE_RE = /^[a-z][a-z0-9_]*$/u;
 const ADMIN_ORDER_STATUSES = new Set(Object.keys(STATUS_LABELS));
 const ADMIN_CALLBACK_STATUSES = new Set(Object.keys(CALLBACK_STATUS_LABELS));
 const ADMIN_SEARCH_FIELDS = new Set(['all', 'external_order_no', 'payment_no', 'provider_trade_no']);
@@ -83,6 +83,17 @@ function allowedValue(value, allowed, fallback = '') {
 }
 
 /**
+ * 插件筛选值。白名单只列注册表里的基础插件，副本编码按它的基础编码放行——
+ * 副本是配置里长出来的，注册表不知道有哪些。
+ */
+function allowedPluginCode(value, knownPluginCodes) {
+  const code = String(value ?? '');
+  if (!PLUGIN_CODE_RE.test(code)) return '';
+  if (!knownPluginCodes) return code;
+  return knownPluginCodes.has(code) || knownPluginCodes.has(basePluginCode(code)) ? code : '';
+}
+
+/**
  * 后台订单查询条件。传入 knownPluginCodes 时按注册表白名单校验插件筛选，
  * 不传（例如纯单测）时退回格式校验。
  */
@@ -94,9 +105,7 @@ export function normalizeAdminOrderQuery(input = {}, knownPluginCodes = null) {
       : 20,
     search_field: allowedValue(input.search_field, ADMIN_SEARCH_FIELDS, 'all'),
     keyword: cleanText(input.keyword, 100),
-    plugin_code: knownPluginCodes
-      ? allowedValue(input.plugin_code, knownPluginCodes)
-      : (PLUGIN_CODE_RE.test(String(input.plugin_code ?? '')) ? String(input.plugin_code) : ''),
+    plugin_code: allowedPluginCode(input.plugin_code, knownPluginCodes),
     status: allowedValue(input.status, ADMIN_ORDER_STATUSES),
     callback_status: allowedValue(input.callback_status, ADMIN_CALLBACK_STATUSES),
   };

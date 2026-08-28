@@ -392,6 +392,20 @@
             </div>
           </details>
           <details open>
+            <summary>一个平台两个账号：复制插件</summary>
+            <div class="ui-doc-body">
+              <p>同一个收款平台要挂两个账号（例如一个微信收商业单、另一个收个人单）时，在“插件配置”里点这一行的<strong>复制</strong>，填一个认得出的名字并勾选“同时新建通道”。副本的编码形如 <code>wxpay_receipt~2</code>。</p>
+              <ul>
+                <li><strong>配置各填各的。</strong>复制不会带走原账号的密钥和收款码——带过去只会让两条通道抢同一笔到账。副本建出来是停用的，补齐配置后再启用。</li>
+                <li><strong>订单、流水去重、轮询租约按副本分开。</strong>一个账号的到账通知不会被拿去匹配另一个账号的订单。</li>
+                <li><strong>分流看通道权重。</strong>两条通道同为一种支付方式时，权重 70 / 30 就是七三分；调成 0 等于只走另一个账号。</li>
+                <li><strong>不用再买一次。</strong>授权按平台算，副本跟着基础插件的 License 权益走。</li>
+                <li>Docker Watcher 会自动接管副本账号，不需要为它单独开容器；用应用宝桥接器的话则是一个微信一台容器。</li>
+              </ul>
+              <p>副本可以随时删除，它的配置和通道一并删掉，历史订单保留。基础插件删不掉，它是构建的一部分。</p>
+            </div>
+          </details>
+          <details open>
             <summary>监听方式：哪些在 Worker，哪些需要 Docker</summary>
             <div class="ui-doc-body">
               <p><strong>统一优先级：</strong>Docker Watcher 在线且声明支持对应插件时，由 Docker 查询；容器离线超过两分钟后，具备 Worker 查询能力的插件自动接管。</p>
@@ -486,6 +500,41 @@
         <div class="ui-dialog-actions">
           <button type="button" data-close-order-action>返回</button>
           <button id="order-action-submit" type="submit">确认操作</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="plugin-duplicate-dialog" class="ui-order-dialog ui-channel-create-dialog" aria-labelledby="plugin-duplicate-title">
+      <header>
+        <div><p class="ui-kicker">COPY PLUGIN</p><h2 id="plugin-duplicate-title">复制插件</h2></div>
+        <button type="button" data-close-plugin-duplicate>取消</button>
+      </header>
+      <form id="plugin-duplicate-form">
+        <p id="plugin-duplicate-source" class="ui-description"></p>
+        <div class="ui-channel-create-grid">
+          <label class="ui-dialog-field ui-channel-create-wide">
+            <span>副本名称</span>
+            <input id="plugin-duplicate-name" name="name" maxlength="40" required placeholder="例如：微信个人 · 个人号" />
+            <small>用来区分这个副本收的是哪个账号的款。</small>
+          </label>
+          <label class="ui-dialog-field">
+            <span>同时新建通道</span>
+            <select id="plugin-duplicate-pay-type" name="pay_type"></select>
+            <small>每个账号一条通道，权重各调各的。</small>
+          </label>
+          <label class="ui-dialog-field">
+            <span>通道权重</span>
+            <input id="plugin-duplicate-weight" name="weight" type="number" min="0" max="100000" step="1" value="100" />
+            <small>同支付方式的通道按权重随机分流。</small>
+          </label>
+          <label class="ui-channel-create-enabled">
+            <input name="copy_config" type="checkbox" />
+            <span>复制已填配置（密钥与收款码除外）</span>
+          </label>
+        </div>
+        <div class="ui-dialog-actions">
+          <button type="button" data-close-plugin-duplicate>返回</button>
+          <button id="plugin-duplicate-submit" type="submit">复制插件</button>
         </div>
       </form>
     </dialog>

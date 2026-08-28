@@ -3,6 +3,8 @@
  * 全部问注册表和插件清单，这里不认识任何具体插件编码。
  */
 
+import { basePluginCode } from './plugin-instances.js';
+
 function normalizedChannel(registry, input, fallbackIndex) {
   const id = Number(input?.id);
   const pluginCode = String(input?.plugin_code ?? '').trim();
@@ -71,10 +73,14 @@ export function weightedChannel(candidates, random = Math.random()) {
 export function resolveChannel(registry, channels, payType) {
   const type = String(payType ?? '').trim().toLowerCase();
   if (!type) throw new Error('type 参数不能为空');
-  // type 允许直接写插件编码，指定用某个插件收款。
+  // type 允许直接写插件编码，指定用某个插件收款。写基础编码时，该插件所有副本的
+  // 通道都是候选，仍按权重随机——上游只想"走微信个人收款"，不必关心是哪个账号。
   const exactPlugin = registry.get(type);
   const candidates = exactPlugin
-    ? channels.filter((channel) => channel.plugin_code === exactPlugin.manifest.code)
+    ? channels.filter((channel) => (
+      channel.plugin_code === exactPlugin.manifest.code
+      || basePluginCode(channel.plugin_code) === type
+    ))
     : channels.filter((channel) => channel.pay_types.includes(type));
   const selected = weightedChannel(candidates);
   if (!selected) throw new Error('没有启用的支付通道或通道权重为 0');

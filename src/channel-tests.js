@@ -1,6 +1,7 @@
 import {
   fenToMoney, isHttpsUrl, moneyToFen, requireText,
 } from './epay-v1.js';
+import { basePluginCode } from './plugin-instances.js';
 
 export const CHANNEL_TEST_DEVICES = Object.freeze([
   ['auto', '自动识别'],
@@ -71,13 +72,13 @@ export function channelTestFields(input, channel, {
 
   const compactTime = now.toISOString().replace(/\D/gu, '').slice(0, 14);
   const outTradeNo = `CHTEST${channel.id}${compactTime}${String(randomSuffix).replace(/\W/gu, '').slice(0, 12)}`;
-  const requestedWechatProduct = channel.plugin_code === 'wechat_api'
+  const requestedWechatProduct = basePluginCode(channel.plugin_code) === 'wechat_api'
     ? String(input?.wechat_product ?? 'auto').trim().toLowerCase() || 'auto'
     : 'auto';
   if (!CHANNEL_TEST_WECHAT_PRODUCTS.some(([product]) => product === requestedWechatProduct)) {
     throw new Error('微信测试产品不支持');
   }
-  const requestedAlipayProduct = channel.plugin_code === 'alipay_api'
+  const requestedAlipayProduct = basePluginCode(channel.plugin_code) === 'alipay_api'
     ? String(input?.alipay_product ?? 'auto').trim().toLowerCase() || 'auto'
     : 'auto';
   if (!CHANNEL_TEST_ALIPAY_PRODUCTS.some(([product]) => product === requestedAlipayProduct)) {
