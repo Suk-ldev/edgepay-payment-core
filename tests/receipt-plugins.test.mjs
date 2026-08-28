@@ -123,7 +123,12 @@ test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功�
     timestamp: String(timestamp),
     sign: await hmacSha256Base64(secret, `${timestamp}\n${secret}`),
     from: 'com.tencent.mm',
-    content: JSON.stringify({ title: '微信收款助手', msg: '连通性探测' }),
+    content: JSON.stringify({
+      title: '微信收款助手',
+      msg: '连通性探测',
+      watcher_kind: 'android',
+      watcher_instance: 'phone-test-1',
+    }),
   };
   const parsed = await parseSmsForwarder(input, {
     sms_forwarder_secret: secret,
@@ -131,6 +136,8 @@ test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功�
   }, timestamp / 1_000);
   assert.equal(parsed.probe, true);
   assert.equal(parsed.amountFen, undefined);
+  assert.equal(parsed.content.watcher_kind, 'android');
+  assert.equal(parsed.content.watcher_instance, 'phone-test-1');
   // 探测消息签名不对时仍要按验签失败拒绝，不能放行。
   await assert.rejects(
     () => parseSmsForwarder({ ...input, sign: 'wrong' }, {

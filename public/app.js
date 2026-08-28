@@ -1,5 +1,8 @@
 const pluginBody = document.querySelector('#plugins-body');
 const channelBody = document.querySelector('#channels-body');
+const systemStatusGrid = document.querySelector('#system-status-grid');
+const systemStatusChecked = document.querySelector('#system-status-checked');
+const systemStatusRefresh = document.querySelector('#refresh-system-status');
 const orderBody = document.querySelector('#orders-body');
 const orderFilters = document.querySelector('#order-filters');
 const ordersSummary = document.querySelector('#orders-summary');
@@ -66,6 +69,7 @@ let noticeTimer;
 const pluginQuery = { keyword: '', status: 'licensed' };
 const channelQuery = { keyword: '', status: '' };
 const ADMIN_SECTIONS = Object.freeze({
+  status: '系统状态',
   site: '收银台设置',
   plugins: '插件配置',
   channels: '通道管理',
@@ -111,6 +115,53 @@ function dateTime(value) {
   return Number.isNaN(parsed.getTime())
     ? text(value)
     : parsed.toLocaleString('zh-CN', { hour12: false });
+}
+
+const LISTENER_STATUS_META = Object.freeze({
+  online: { label: '在线', className: 'is-online' },
+  partial: { label: '部分在线', className: 'is-partial' },
+  offline: { label: '离线', className: 'is-offline' },
+  unknown: { label: '未上报', className: 'is-unknown' },
+});
+
+function renderSystemStatus(payload = {}) {
+  const listeners = payload.listeners ?? {};
+  const cards = [
+    { key: 'docker', title: '监听器', subtitle: 'Docker Watcher' },
+    { key: 'yyb_bridge', title: '应用宝监听', subtitle: 'YYB Bridge' },
+    { key: 'android', title: '安卓监听', subtitle: 'Android Watcher' },
+  ];
+  systemStatusGrid.innerHTML = cards.map(({ key, title, subtitle }) => {
+    const listener = listeners[key] ?? {};
+    const meta = LISTENER_STATUS_META[listener.status] ?? LISTENER_STATUS_META.unknown;
+    const total = Math.max(0, Number(listener.total_instances) || 0);
+    const online = Math.min(total, Math.max(0, Number(listener.online_instances) || 0));
+    const channelIds = Array.isArray(listener.channel_ids) ? listener.channel_ids : [];
+    const plugins = Array.isArray(listener.plugins) ? listener.plugins : [];
+    const scope = key === 'android'
+      ? (channelIds.length ? `通道 ${channelIds.map((id) => `#${id}`).join('、')}` : '暂无通道')
+      : (plugins.length ? `${plugins.length} 个插件` : '暂无插件');
+    return `<article class="ui-system-status-card ${meta.className}">
+      <header><div><span class="ui-status-dot" aria-hidden="true"></span><h3>${title}<small>${subtitle}</small></h3></div><strong>${meta.label}</strong></header>
+      <dl><div><dt>在线实例</dt><dd>${online} / ${total}</dd></div><div><dt>监听范围</dt><dd>${text(scope)}</dd></div><div><dt>最近上报</dt><dd>${listener.last_seen_at ? dateTime(listener.last_seen_at) : '—'}</dd></div></dl>
+    </article>`;
+  }).join('');
+  systemStatusChecked.textContent = `更新于 ${dateTime(payload.checked_at)}`;
+}
+
+async function loadSystemStatus({ quiet = false } = {}) {
+  if (!quiet) {
+    systemStatusRefresh.disabled = true;
+    systemStatusRefresh.textContent = '刷新中…';
+  }
+  try {
+    renderSystemStatus(await request('/admin/api/system-status'));
+  } finally {
+    if (!quiet) {
+      systemStatusRefresh.disabled = false;
+      systemStatusRefresh.textContent = '刷新状态';
+    }
+  }
 }
 
 function showNotice(message, state = 'ok') {
@@ -364,7 +415,7 @@ function renderChannels(channels) {
     <td><label class="ui-inline-field ui-channel-pay-type-field"><span class="sr-only">通道 ${text(channel.id)} 支付方式</span><select class="channel-pay-type">${(channel.available_pay_types ?? channel.pay_types).map((payType) => `<option value="${text(payType)}" ${channel.pay_types[0] === payType ? 'selected' : ''}>${text(payType)}</option>`).join('')}</select></label></td>
     <td><label class="ui-inline-field"><span class="sr-only">通道 ${text(channel.id)} 权重</span><input class="channel-weight" type="number" min="0" max="100000" step="1" value="${text(channel.weight)}" /></label><small>相同类型按权重随机</small></td>
     <td><label class="ui-inline-field ui-inline-field--expire"><span class="sr-only">通道 ${text(channel.id)} 订单有效期</span><input class="channel-expire" type="number" min="1" max="1440" step="1" value="${channel.order_expire_minutes == null ? '' : text(channel.order_expire_minutes)}" placeholder="继承全局" /></label><small>${channel.order_expire_minutes == null ? '继承收银台设置' : '分钟'}</small></td>
-    <td><label class="ui-channel-toggle"><input class="channel-enabled" type="checkbox" ${channel.enabled ? 'checked' : ''} /><span>${channel.enabled ? '启用' : '停用'}</span></label>${channel.plugin_enabled ? '' : '<small class="danger-text">插件已停用</small>'}</td>
+    <td><label class="ui-channel-toggle"><input class="channel-enabled" type="checkbox" ${channel.enabled ? 'checked' : ''} /><span>${channel.enabled ? '启用' : '停用'}</span></label>${channel.plugin_enabled ? '' : '<small class="danger-text">插件已停用</small>'}${channel.listener_presence ? `<small class="${channel.listener_presence.status === 'offline' ? 'danger-text' : ''}">${text({ online: '手机在线', offline: '手机离线', unknown: '未收到手机心跳' }[channel.listener_presence.status] ?? '未收到手机心跳')}</small>` : ''}</td>
     <td><div class="ui-channel-actions"><button class="ui-row-action" type="button" data-test-channel="${text(channel.id)}" ${channel.enabled && channel.plugin_enabled ? '' : 'disabled'}>测试</button><button class="ui-row-action ui-row-action-danger" type="button" data-delete-channel="${text(channel.id)}">删除本通道</button></div></td>
   </tr>`).join('');
   applyChannelFilters();
@@ -1429,7 +1480,9 @@ function applyAdminSection() {
 
 async function load({ keepEditor = false } = {}) {
   try {
-    if (activeAdminSection === 'site' || activeAdminSection === 'docs') {
+    if (activeAdminSection === 'status') {
+      await loadSystemStatus();
+    } else if (activeAdminSection === 'site' || activeAdminSection === 'docs') {
       const site = await request('/admin/api/site');
       renderSiteConfig(site.config, site.contact_url, site.poll_trigger_url);
     } else if (activeAdminSection === 'plugins') {
@@ -1463,6 +1516,8 @@ async function load({ keepEditor = false } = {}) {
       } else if (activeAdminSection === 'orders') {
         orderBody.innerHTML = '<tr><td colspan="11" class="ui-empty">无法加载订单</td></tr>';
         ordersSummary.textContent = '订单读取失败';
+      } else if (activeAdminSection === 'status') {
+        systemStatusChecked.textContent = '状态读取失败';
       }
       showNotice(error.message, 'error');
     }
@@ -1837,6 +1892,14 @@ function alertFormPayload() {
 
 document.querySelector('#alert-provider')?.addEventListener('change', applyAlertProviderFields);
 
+systemStatusRefresh.addEventListener('click', async () => {
+  try {
+    await loadSystemStatus();
+  } catch (error) {
+    if (error.message !== 'unauthorized') showNotice(error.message, 'error');
+  }
+});
+
 document.querySelector('#alert-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const button = event.submitter ?? event.target.querySelector('button[type="submit"]');
@@ -1878,3 +1941,6 @@ applyAdminSection();
 // 版本检查不参与首屏：等页面数据到位再问，免得和插件列表抢连接。
 // 服务端那边也做了缓存，正常情况下这一下只是读一次 D1。
 load().finally(checkVersionUpdate);
+if (activeAdminSection === 'status') {
+  setInterval(() => loadSystemStatus({ quiet: true }).catch(() => {}), 15_000);
+}

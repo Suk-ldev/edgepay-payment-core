@@ -3,12 +3,27 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { receiptPollResponse } from '../src/index.js';
 
-test('后台导航使用七个独立 URL，不再使用长页面锚点', async () => {
+test('后台导航使用八个独立 URL，不再使用长页面锚点', async () => {
   const html = await readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8');
-  for (const section of ['site', 'plugins', 'channels', 'alerts', 'orders', 'keys', 'docs']) {
+  for (const section of ['status', 'site', 'plugins', 'channels', 'alerts', 'orders', 'keys', 'docs']) {
     assert.match(html, new RegExp(`href="/admin/${section}" data-section-link="${section}"`, 'u'));
   }
   assert.doesNotMatch(html, /data-section-link(?:>|[\s])/u);
+});
+
+test('系统状态页分别显示 Docker、应用宝和 Android 监听端并自动刷新', async () => {
+  const [html, script, worker] = await Promise.all([
+    readFile(new URL('../public/dashboard.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/core/request-router.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(html, /id="system-status-grid"/u);
+  for (const label of ['Docker Watcher', '应用宝监听', 'Android 监听']) assert.match(html, new RegExp(label, 'u'));
+  assert.match(script, /request\('\/admin\/api\/system-status'\)/u);
+  assert.match(script, /setInterval\(\(\) => loadSystemStatus/u);
+  assert.match(worker, /watcherSystemStatus/u);
+  assert.match(worker, /pathname === '\/admin\/api\/system-status'/u);
+  assert.match(worker, /x-edgepay-watcher-kind/u);
 });
 
 test('插件页支持搜索和启停，通道页用下拉框选择支付方式并可新增、删除通道', async () => {

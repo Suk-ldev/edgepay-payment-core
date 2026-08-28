@@ -16,6 +16,7 @@
       </a>
       <p class="ui-nav-label">工作台</p>
       <nav class="ui-admin-nav" aria-label="后台导航">
+        <a href="/admin/status" data-section-link="status">系统状态</a>
         <a href="/admin/site" data-section-link="site">收银台设置</a>
         <a href="/admin/plugins" data-section-link="plugins">插件配置</a>
         <a href="/admin/channels" data-section-link="channels">通道管理</a>
@@ -31,6 +32,18 @@
         <div><p class="ui-kicker">EDGEPAY / PLATFORM</p><h1 id="admin-page-title">收银台设置</h1></div>
         <div class="ui-user"><span class="ui-online-dot" aria-hidden="true"></span>管理会话有效<form action="/admin/logout" method="post"><button type="submit">退出登录</button></form></div>
       </header>
+
+      <section id="status" class="ui-section" hidden>
+        <div class="ui-section-heading">
+          <div><h2>监听状态</h2></div>
+          <div class="ui-status-heading"><span id="system-status-checked">正在读取…</span><button id="refresh-system-status" type="button">刷新状态</button></div>
+        </div>
+        <div id="system-status-grid" class="ui-system-status-grid" aria-live="polite">
+          <article class="ui-system-status-card is-loading"><div><span class="ui-status-dot"></span><h3>Docker Watcher</h3></div><strong>读取中</strong></article>
+          <article class="ui-system-status-card is-loading"><div><span class="ui-status-dot"></span><h3>应用宝监听</h3></div><strong>读取中</strong></article>
+          <article class="ui-system-status-card is-loading"><div><span class="ui-status-dot"></span><h3>Android 监听</h3></div><strong>读取中</strong></article>
+        </div>
+      </section>
 
       <section id="site" class="ui-section">
         <div class="ui-section-heading">
@@ -305,7 +318,7 @@
         </div>
         <div class="ui-key-grid">
           <article class="ui-key-card">
-            <header><div><h3>监听器掉线</h3><p>Docker Watcher 或应用宝协议监听超过存活窗口没有上报。</p></div><span class="ui-key-state">critical</span></header>
+            <header><div><h3>监听器掉线</h3><p>Docker Watcher、应用宝桥接器或 Android 到账监听超过存活窗口没有上报。</p></div><span class="ui-key-state">critical</span></header>
             <dl><div><dt>事件名</dt><dd><code>watcher_offline:*</code></dd></div><div><dt>恢复</dt><dd>重新上报后自动销案</dd></div></dl>
           </article>
           <article class="ui-key-card">

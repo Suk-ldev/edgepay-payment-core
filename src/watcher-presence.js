@@ -1,5 +1,5 @@
 /**
- * Docker Watcher 在线状态。
+ * 外部监听端在线状态。
  *
  * 以前这里只有一行 `watcher_presence`，谁调 `/api/watcher/snapshot` 就整个覆盖它。
  * 单个 Watcher 时没问题，但同时跑两个（比如官方镜像负责渠道流水、另一个进程负责
@@ -17,6 +17,8 @@ export const PRESENCE_TTL_MS = 120_000;
 const PRESENCE_THROTTLE_MS = 30_000;
 /** 早就离线的实例行没有保留价值，顺手清掉，避免键无限增长。 */
 export const PRESENCE_SWEEP_MS = 600_000;
+
+export const WATCHER_KINDS = Object.freeze(['docker', 'yyb_bridge', 'android']);
 
 const encoder = new TextEncoder();
 
@@ -39,8 +41,16 @@ export async function presenceKey(instanceId, capabilities) {
 }
 
 /** 记录一个实例当前声明的插件能力。 */
-export async function recordWatcherPresence(env, key, capabilities, now = Date.now()) {
-  const value = JSON.stringify({ plugins: [...capabilities].sort() });
+export async function recordWatcherPresence(env, key, capabilities, now = Date.now(), details = {}) {
+  const channelIds = [...new Set((details.channelIds ?? [])
+    .map(Number)
+    .filter((value) => Number.isSafeInteger(value) && value > 0))].sort((left, right) => left - right);
+  const value = JSON.stringify({
+    plugins: [...capabilities].map(String).sort(),
+    ...(details.polling === false ? { polling: false } : {}),
+    ...(String(details.kind ?? '').trim() ? { kind: String(details.kind).trim().slice(0, 32) } : {}),
+    ...(channelIds.length ? { channel_ids: channelIds } : {}),
+  });
   const updatedAt = new Date(now).toISOString();
   const throttleBefore = new Date(now - PRESENCE_THROTTLE_MS).toISOString();
   const sweepBefore = new Date(now - PRESENCE_SWEEP_MS).toISOString();
@@ -83,6 +93,10 @@ export async function staleWatcherInstances(env, now = Date.now()) {
     stale.push({
       key: String(row.setting_key ?? '').replace(PRESENCE_PREFIX, ''),
       plugins: Array.isArray(parsed?.plugins) ? parsed.plugins.map(String) : [],
+      kind: String(parsed?.kind ?? ''),
+      channelIds: Array.isArray(parsed?.channel_ids)
+        ? parsed.channel_ids.map(Number).filter((value) => Number.isSafeInteger(value) && value > 0)
+        : [],
       silentMs,
     });
   }
@@ -106,13 +120,103 @@ export async function onlineWatcherPlugins(env, now = Date.now()) {
     if (!Number.isFinite(updatedAt) || updatedAt < now - PRESENCE_TTL_MS) continue;
     let parsed;
     try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
-    if (!Array.isArray(parsed?.plugins)) continue;
+    if (!Array.isArray(parsed?.plugins) || parsed.polling === false) continue;
     for (const code of parsed.plugins) {
       const text = String(code ?? '').trim();
       if (text) plugins.add(text);
     }
   }
   return plugins;
+}
+
+/** Android 监听端按通道上报的最近在线状态，供管理台直接显示。 */
+export async function watcherChannelPresence(env, now = Date.now()) {
+  const { results } = await env.DB.prepare(`
+    SELECT value_text, updated_at FROM runtime_settings
+    WHERE setting_key LIKE ?
+  `).bind(`${PRESENCE_PREFIX}%`).all();
+  const channels = new Map();
+  for (const row of results ?? []) {
+    const updatedAt = Date.parse(String(row?.updated_at ?? ''));
+    if (!Number.isFinite(updatedAt)) continue;
+    let parsed;
+    try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
+    if (parsed?.kind !== 'android' || !Array.isArray(parsed.channel_ids)) continue;
+    for (const rawId of parsed.channel_ids) {
+      const channelId = Number(rawId);
+      if (!Number.isSafeInteger(channelId) || channelId <= 0) continue;
+      const previous = channels.get(channelId);
+      if (previous && Date.parse(previous.last_seen_at) >= updatedAt) continue;
+      channels.set(channelId, {
+        status: now - updatedAt < PRESENCE_TTL_MS ? 'online' : 'offline',
+        last_seen_at: new Date(updatedAt).toISOString(),
+      });
+    }
+  }
+  return channels;
+}
+
+/**
+ * 管理台系统状态页使用的监听端汇总。
+ *
+ * 新版监听端会直接写入 kind；已部署的应用宝桥接器实例 ID 固定以
+ * `yyb-bridge-` 开头，因此旧版本也能立即被正确归类。更早的普通 Watcher
+ * 没有 kind 和实例 ID，按 Docker Watcher 处理。
+ */
+export async function watcherSystemStatus(env, now = Date.now()) {
+  const { results } = await env.DB.prepare(`
+    SELECT setting_key, value_text, updated_at FROM runtime_settings
+    WHERE setting_key = 'watcher_presence' OR setting_key LIKE ?
+  `).bind(`${PRESENCE_PREFIX}%`).all();
+  const groups = Object.fromEntries(WATCHER_KINDS.map((kind) => [kind, {
+    status: 'unknown',
+    total_instances: 0,
+    online_instances: 0,
+    last_seen_at: '',
+    plugins: [],
+    channel_ids: [],
+  }]));
+  const pluginSets = Object.fromEntries(WATCHER_KINDS.map((kind) => [kind, new Set()]));
+  const channelSets = Object.fromEntries(WATCHER_KINDS.map((kind) => [kind, new Set()]));
+
+  for (const row of results ?? []) {
+    const updatedAt = Date.parse(String(row?.updated_at ?? ''));
+    if (!Number.isFinite(updatedAt)) continue;
+    let parsed;
+    try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
+    if (!Array.isArray(parsed?.plugins)) continue;
+    const key = String(row?.setting_key ?? '').replace(PRESENCE_PREFIX, '');
+    const declaredKind = String(parsed?.kind ?? '').trim();
+    const kind = WATCHER_KINDS.includes(declaredKind)
+      ? declaredKind
+      : (/^id:yyb-bridge-/u.test(key) ? 'yyb_bridge' : (parsed?.polling === false ? 'android' : 'docker'));
+    const group = groups[kind];
+    group.total_instances += 1;
+    if (now - updatedAt < PRESENCE_TTL_MS) group.online_instances += 1;
+    if (!group.last_seen_at || Date.parse(group.last_seen_at) < updatedAt) {
+      group.last_seen_at = new Date(updatedAt).toISOString();
+    }
+    for (const code of parsed.plugins) {
+      const plugin = String(code ?? '').trim();
+      if (plugin) pluginSets[kind].add(plugin);
+    }
+    for (const rawId of Array.isArray(parsed.channel_ids) ? parsed.channel_ids : []) {
+      const channelId = Number(rawId);
+      if (Number.isSafeInteger(channelId) && channelId > 0) channelSets[kind].add(channelId);
+    }
+  }
+
+  for (const kind of WATCHER_KINDS) {
+    const group = groups[kind];
+    if (group.online_instances > 0) {
+      group.status = group.online_instances === group.total_instances ? 'online' : 'partial';
+    } else if (group.total_instances > 0) {
+      group.status = 'offline';
+    }
+    group.plugins = [...pluginSets[kind]].sort();
+    group.channel_ids = [...channelSets[kind]].sort((left, right) => left - right);
+  }
+  return groups;
 }
 
 /** 仍在存活窗口内的实例键。用于恢复后把它那条掉线静默期清掉。 */

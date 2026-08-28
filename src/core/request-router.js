@@ -46,6 +46,7 @@ import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } f
 import {
   PRESENCE_PREFIX, PRESENCE_SWEEP_MS, PRESENCE_TTL_MS,
   liveWatcherInstances, onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances,
+  watcherChannelPresence, watcherSystemStatus,
 } from '../watcher-presence.js';
 import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
 import { pluginContext } from './plugin-context.js';
@@ -1304,12 +1305,19 @@ async function watcherSnapshot(request, env) {
     .split(',')
     .map((value) => value.trim())
     .filter((value) => registry.hasBase(value)))].sort();
+  const instanceId = String(request.headers.get('x-edgepay-watcher-instance') ?? '').trim();
+  const declaredKind = String(request.headers.get('x-edgepay-watcher-kind') ?? '').trim();
+  const watcherKind = ['docker', 'yyb_bridge'].includes(declaredKind)
+    ? declaredKind
+    : (/^yyb-bridge-/u.test(instanceId) ? 'yyb_bridge' : 'docker');
   // 每个 Watcher 实例各写各的行，读的时候取并集：同时跑两个 Watcher 时
   // 不会再互相把对方声明的插件冲掉。详见 watcher-presence.js。
   await recordWatcherPresence(
     env,
-    await presenceKey(request.headers.get('x-edgepay-watcher-instance'), capabilities),
+    await presenceKey(instanceId, capabilities),
     capabilities,
+    Date.now(),
+    { kind: watcherKind },
   );
   const supported = new Set(capabilities);
   const [accounts, discoveries] = await Promise.all([
@@ -1543,6 +1551,17 @@ async function channelsAffectedByPlugins(env, basePlugins) {
     .map((channel) => channelAlertLabel(registry, config, channel));
 }
 
+/** 手机心跳绑定的是确切通道，不把同一插件的其它账号一并报成掉线。 */
+async function channelsAffectedByIds(env, channelIds) {
+  const wanted = new Set(channelIds.map(Number));
+  if (!wanted.size) return [];
+  const { registry } = runtimeOf(env);
+  const [channels, config] = await Promise.all([runtimeChannels(env), runtimePluginConfig(env)]);
+  return channels
+    .filter((channel) => channel.enabled && wanted.has(Number(channel.id)))
+    .map((channel) => channelAlertLabel(registry, config, channel));
+}
+
 /**
  * 巡检 Watcher 掉线。
  *
@@ -1554,12 +1573,19 @@ async function checkWatcherLiveness(env, now = Date.now()) {
   const secret = settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '');
   for (const item of stale) {
     const minutes = Math.round(item.silentMs / 60_000);
-    const affected = await channelsAffectedByPlugins(env, item.plugins).catch(() => []);
+    const affected = await (item.channelIds.length
+      ? channelsAffectedByIds(env, item.channelIds)
+      : channelsAffectedByPlugins(env, item.plugins)).catch(() => []);
+    const listenerName = {
+      android: 'Android 到账监听',
+      yyb_bridge: '应用宝监听器',
+      docker: 'Docker Watcher',
+    }[item.kind] ?? '监听器';
     await emitAlert(env, {
       event: `watcher_offline:${item.key}`,
       level: 'critical',
-      title: 'EdgePay 监听器掉线',
-      message: `监听器已 ${minutes} 分钟没有上报，这期间以下通道的到账不会被确认：\n`
+      title: `EdgePay ${listenerName}掉线`,
+      message: `${listenerName}已 ${minutes} 分钟没有上报，这期间以下通道的到账不会被确认：\n`
         + (affected.length
           ? affected.join('\n')
           : `（暂无启用中的通道）受影响的插件：${item.plugins.join('、') || '未知'}`),
@@ -1891,6 +1917,18 @@ async function smsForwarderChannelNotify(request, env, ctx, channel, plugin, plu
     // 监听端的连通性探测心跳：已验签、无金额，直接回成功，别当成一次真实到账去匹配订单。
     // legacy=1 时回纯文本 "200"，兼容以正文判断成败的监听工具（mpay 等）。
     if (signal.probe) {
+      const watcherKind = String(signal.content?.watcher_kind ?? '').trim();
+      const watcherInstance = String(signal.content?.watcher_instance ?? '').trim();
+      if (watcherKind === 'android' && /^[A-Za-z0-9._-]{8,40}$/u.test(watcherInstance)) {
+        const capabilities = [plugin.manifest.code];
+        await recordWatcherPresence(
+          env,
+          await presenceKey(`android-${channel.id}-${watcherInstance}`, capabilities),
+          capabilities,
+          Date.now(),
+          { polling: false, kind: 'android', channelIds: [channel.id] },
+        );
+      }
       if (new URL(request.url).searchParams.get('legacy') === '1') {
         return new Response('200', {
           status: 200,
@@ -3050,11 +3088,22 @@ async function keyManagementApi(request, env) {
   }
 }
 
+async function systemStatusApi(request, env) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'GET') return new Response('method_not_allowed', { status: 405 });
+  const checkedAt = Date.now();
+  return jsonResponse({
+    checked_at: new Date(checkedAt).toISOString(),
+    listeners: await watcherSystemStatus(env, checkedAt),
+  });
+}
+
 async function adminChannelData(env, channels = null) {
-  const [resolvedChannels, config, licensed] = await Promise.all([
+  const [resolvedChannels, config, licensed, listenerPresence] = await Promise.all([
     channels ? Promise.resolve(channels) : runtimeChannels(env),
     runtimePluginConfig(env),
     licensedCodes(env),
+    watcherChannelPresence(env),
   ]);
   return {
     results: resolvedChannels.filter((channel) => licenseCovers(licensed, channel.plugin_code)).map((channel) => {
@@ -3065,6 +3114,9 @@ async function adminChannelData(env, channels = null) {
         // 通道页要一眼看得出这条路由挂在哪个账号上，光有编码不够。
         plugin_name: pluginDisplayName(runtimeOf(env).registry, config, channel.plugin_code),
         plugin_enabled: pluginEnabled(runtimeOf(env).registry, config, channel.plugin_code),
+        ...(plugin?.manifest.receiptSource === 'sms_forwarder'
+          ? { listener_presence: listenerPresence.get(Number(channel.id)) ?? { status: 'unknown', last_seen_at: '' } }
+          : {}),
       };
     }),
     // 副本也要出现在这份列表里：新增通道时得能挑到"微信个人收款监听 2"。
@@ -3377,6 +3429,7 @@ async function route(request, env, ctx) {
   if (pathname === '/admin/api/alerts' && ['GET', 'PUT'].includes(request.method)) return alertConfigApi(request, env);
   if (pathname === '/admin/api/alerts/test' && request.method === 'POST') return alertTestApi(request, env);
   if (pathname === '/admin/api/keys' && ['GET', 'POST'].includes(request.method)) return keyManagementApi(request, env);
+  if (pathname === '/admin/api/system-status' && request.method === 'GET') return systemStatusApi(request, env);
   if (pathname === '/admin/api/channels' && ['GET', 'PUT'].includes(request.method)) return channelsApi(request, env);
   const adminChannelDeleteMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)$/u);
   if (adminChannelDeleteMatch && request.method === 'DELETE') {
@@ -3390,7 +3443,7 @@ async function route(request, env, ctx) {
     if (!await isAdminSession(request, env)) return adminLoginRedirect(request);
     return Response.redirect(new URL('/admin/site', request.url), 303);
   }
-  if (/^\/admin\/(?:site|plugins|channels|alerts|orders|keys|docs)$/u.test(pathname)) {
+  if (/^\/admin\/(?:status|site|plugins|channels|alerts|orders|keys|docs)$/u.test(pathname)) {
     if (!await isAdminSession(request, env)) return adminLoginRedirect(request);
     return adminDashboard(request, env);
   }

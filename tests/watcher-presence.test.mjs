@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { webcrypto } from 'node:crypto';
-import { onlineWatcherPlugins, presenceKey, recordWatcherPresence } from '../src/watcher-presence.js';
+import {
+  onlineWatcherPlugins, presenceKey, recordWatcherPresence, staleWatcherInstances,
+  watcherChannelPresence, watcherSystemStatus,
+} from '../src/watcher-presence.js';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
@@ -15,11 +18,11 @@ function memoryDb(rows = new Map()) {
         bind(...values) { this.values = values; return this; },
         async first() { return null; },
         async all() {
-          if (!sql.includes('SELECT value_text')) return { results: [] };
+          if (!sql.includes('value_text')) return { results: [] };
           const like = String(this.values[0]).replace(/%/gu, '');
           const results = [...rows.entries()]
             .filter(([key]) => key === 'watcher_presence' || key.startsWith(like))
-            .map(([, row]) => row);
+            .map(([key, row]) => ({ setting_key: key, ...row }));
           return { results };
         },
         async run() {
@@ -88,6 +91,60 @@ test('超过 TTL 的实例退出并集，其余不受影响', async () => {
   // stale 已经 130 秒没上报
   const online = await onlineWatcherPlugins(env, NOW + 130_000);
   assert.deepEqual([...online], ['wxpay_receipt']);
+});
+
+test('Android 心跳按通道记录，但不冒充 Docker 轮询能力', async () => {
+  const env = { DB: memoryDb() };
+  await recordWatcherPresence(
+    env,
+    'watcher_presence:id:android-8-phone-test-1',
+    ['wxpay_receipt~2'],
+    NOW,
+    { polling: false, kind: 'android', channelIds: [8] },
+  );
+
+  assert.deepEqual([...await onlineWatcherPlugins(env, NOW)], []);
+  assert.deepEqual((await watcherChannelPresence(env, NOW)).get(8), {
+    status: 'online',
+    last_seen_at: new Date(NOW).toISOString(),
+  });
+
+  const stale = await staleWatcherInstances(env, NOW + 130_000);
+  assert.deepEqual(stale, [{
+    key: 'id:android-8-phone-test-1',
+    plugins: ['wxpay_receipt~2'],
+    kind: 'android',
+    channelIds: [8],
+    silentMs: 130_000,
+  }]);
+  assert.equal((await watcherChannelPresence(env, NOW + 130_000)).get(8).status, 'offline');
+});
+
+test('系统状态分别汇总 Docker、应用宝和 Android 监听端', async () => {
+  const rows = new Map([
+    ['watcher_presence:set:docker', {
+      value_text: JSON.stringify({ plugins: ['fubei_receipt'], kind: 'docker' }),
+      updated_at: new Date(NOW).toISOString(),
+    }],
+    // 旧版桥接器没有 kind，但稳定实例 ID 带 yyb-bridge 前缀。
+    ['watcher_presence:id:yyb-bridge-test', {
+      value_text: JSON.stringify({ plugins: ['wxpay_receipt'] }),
+      updated_at: new Date(NOW - 30_000).toISOString(),
+    }],
+    ['watcher_presence:id:android-8-phone', {
+      value_text: JSON.stringify({ plugins: ['wxpay_receipt~2'], polling: false, kind: 'android', channel_ids: [8] }),
+      updated_at: new Date(NOW - 130_000).toISOString(),
+    }],
+  ]);
+  const status = await watcherSystemStatus({ DB: memoryDb(rows) }, NOW);
+  assert.deepEqual(status.docker, {
+    status: 'online', total_instances: 1, online_instances: 1,
+    last_seen_at: new Date(NOW).toISOString(), plugins: ['fubei_receipt'], channel_ids: [],
+  });
+  assert.equal(status.yyb_bridge.status, 'online');
+  assert.equal(status.yyb_bridge.online_instances, 1);
+  assert.equal(status.android.status, 'offline');
+  assert.deepEqual(status.android.channel_ids, [8]);
 });
 
 test('升级后旧版单行 watcher_presence 仍然被认，直到它自己过期', async () => {
