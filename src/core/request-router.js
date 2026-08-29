@@ -194,6 +194,110 @@ async function runtimePluginConfig(env) {
   return merged;
 }
 
+/**
+ * 大字段（收款码图片）不与业务配置同住一行。
+ *
+ * 收款码以 base64 内联，一张一百多 KB，几个插件加起来把 plugin_config 撑到近 700 KB。
+ * 热路径——快照轮询、通道路由、掉线告警——要的只是密钥、开关这些短字段，却得先把
+ * 整份密文解开才拿得到，CPU 全花在搬字节上（见 runtime-settings.js 里 base64 的注释）。
+ * 所以超过阈值的值各自存一行 `plugin_asset:<插件>:<字段>`，主配置里只留一个占位符。
+ *
+ * **留占位符而不是删掉这个键**：配置齐不齐是按字段"存在"判断的
+ * （missingPluginFields / pluginEnabled），删掉会让所有收款插件被判成配置不全而自动
+ * 停用——那等于直接停止收款。
+ *
+ * **按值的体积拆，不按 manifest 声明的 type**：有些插件只在 required 里列了收款码，
+ * 没在 adminFields 里声明成 image，按声明拆会漏掉它们。按体积拆还能顺带覆盖将来
+ * 任何一个长大的字段。
+ */
+const ASSET_VALUE_MARKER = '__edgepay_asset_v1__';
+const ASSET_INLINE_MAX_CHARS = 4_096;
+const PLUGIN_ASSET_PREFIX = 'plugin_asset:';
+
+function pluginAssetSettingKey(pluginCode, field) {
+  return `${PLUGIN_ASSET_PREFIX}${pluginCode}:${field}`;
+}
+
+function splitPluginConfigAssets(config) {
+  const lean = {};
+  const assets = new Map();
+  for (const [pluginCode, section] of Object.entries(config ?? {})) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) {
+      lean[pluginCode] = section;
+      continue;
+    }
+    const leanSection = {};
+    for (const [field, value] of Object.entries(section)) {
+      if (typeof value === 'string' && value.length > ASSET_INLINE_MAX_CHARS) {
+        assets.set(pluginAssetSettingKey(pluginCode, field), value);
+        leanSection[field] = ASSET_VALUE_MARKER;
+      } else {
+        leanSection[field] = value;
+      }
+    }
+    lean[pluginCode] = leanSection;
+  }
+  return { lean, assets };
+}
+
+/**
+ * 把占位符换回真正的值。
+ *
+ * `pluginCode` 传了就只补那一个插件：收银台一次只渲染一张收款码，没必要为此
+ * 解开其它插件的图片。管理台插件页要显示每张图，才整份补。
+ */
+async function hydratePluginConfig(env, config, pluginCode = '') {
+  const secret = settingsEncryptionSecret(env);
+  const hydrated = { ...config };
+  for (const [code, section] of Object.entries(config ?? {})) {
+    if (pluginCode && code !== pluginCode) continue;
+    if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
+    let filled = null;
+    for (const [field, value] of Object.entries(section)) {
+      if (value !== ASSET_VALUE_MARKER) continue;
+      const stored = await readEncryptedJsonSetting(
+        env,
+        pluginAssetSettingKey(code, field),
+        secret,
+        null,
+      );
+      if (!filled) filled = { ...section };
+      filled[field] = typeof stored?.value === 'string' ? stored.value : '';
+    }
+    if (filled) hydrated[code] = filled;
+  }
+  return hydrated;
+}
+
+/** 补过水的完整配置。写入路径必须走它，否则回写会把图片抹成占位符。 */
+async function runtimePluginConfigWithAssets(env, pluginCode = '') {
+  return hydratePluginConfig(env, await runtimePluginConfig(env), pluginCode);
+}
+
+/**
+ * 写插件配置。入参必须是补过水的完整配置。
+ *
+ * 拆分和落盘必须在同一个函数里，三个写入点才不会有谁漏拆——漏一次就是把
+ * 几百 KB 又塞回热路径。同时清掉不再被引用的 asset 行（删插件、清空图片）。
+ */
+async function writeRuntimePluginConfig(env, config) {
+  const secret = settingsEncryptionSecret(env);
+  const { lean, assets } = splitPluginConfigAssets(config);
+  for (const [key, value] of assets) {
+    await writeEncryptedJsonSetting(env, key, secret, { value });
+  }
+  const { results = [] } = await env.DB.prepare(
+    'SELECT setting_key FROM runtime_settings WHERE setting_key LIKE ?',
+  ).bind(`${PLUGIN_ASSET_PREFIX}%`).all();
+  for (const row of results) {
+    const key = String(row?.setting_key ?? '');
+    if (key && !assets.has(key)) {
+      await env.DB.prepare('DELETE FROM runtime_settings WHERE setting_key = ?').bind(key).run();
+    }
+  }
+  await writeEncryptedJsonSetting(env, 'plugin_config', secret, lean);
+}
+
 async function runtimeChannels(env) {
   const override = await readPlainJsonSetting(env, 'channels', null);
   return parseChannels(runtimeOf(env).registry, override);
@@ -350,6 +454,9 @@ async function activeReceiptPayments(env, pluginCode) {
 
 function configuredReceiptImage(plugin, config) {
   const configured = String(config.receipt_qrcode_image ?? '').trim();
+  // 占位符漏到这里说明调用方忘了补水。当成"没配收款码"让上层抛一句人话，
+  // 好过把这串标记塞进 <img> 渲染成一个裂掉的图。
+  if (configured === ASSET_VALUE_MARKER) return '';
   if (['/wechat.png', '/fubei.jpg'].includes(configured)) return '';
   if (configured && !/^[A-Za-z]:[\\/]/u.test(configured)) return configured;
   return '';
@@ -549,7 +656,9 @@ function paymentSnapshot(payment, metadata) {
 async function pluginSetup(env, fields, channel) {
   const plugin = pluginOf(env, channel.plugin_code);
   const { registry } = runtimeOf(env);
-  const allConfig = await runtimePluginConfig(env);
+  // 收银台要把收款码渲染出来，得补水；但一次只渲染这一个插件的那一张，
+  // 没必要连带解开其它插件的图片。
+  const allConfig = await runtimePluginConfigWithAssets(env, channel.plugin_code);
   if (!pluginEnabled(registry, allConfig, plugin.manifest.code)) throw new Error(`${plugin.manifest.name}已停用`);
   const config = configForPlugin(allConfig, plugin.manifest.code);
   const missing = missingPluginFields(registry, allConfig, plugin.manifest.code);
@@ -2759,8 +2868,10 @@ function catalogPluginRow(item, licensed = false) {
 async function pluginConfigPayload(env) {
   const runtime = runtimeOf(env);
   const { registry } = runtime;
+  // 插件页要把每个插件当前的收款码显示出来，这里整份补水。管理台是低频页面，
+  // 值得为此多解几行 asset；热路径读的仍是不含图片的主配置。
   const [config, license] = await Promise.all([
-    runtimePluginConfig(env), runtime.license.state(env, registry),
+    runtimePluginConfigWithAssets(env), runtime.license.state(env, registry),
   ]);
   const licensed = new Set(license.plugins);
   // 已购但没装进这次构建的插件：按权益出货后，新买的插件要去 Deploy 站升级一次才会进包。
@@ -2857,7 +2968,7 @@ async function duplicatePluginApi(request, env) {
     if (!licenseCovers(await licensedCodes(env), baseCode)) {
       return jsonResponse({ ok: false, error: '该插件尚未购买，请先前往 License 站购买' }, 403);
     }
-    const config = await runtimePluginConfig(env);
+    const config = await runtimePluginConfigWithAssets(env);
     const instanceCode = pluginInstanceCode(
       baseCode,
       nextInstanceSequence(baseCode, pluginCodesWithInstances(registry, config)),
@@ -2870,7 +2981,7 @@ async function duplicatePluginApi(request, env) {
     // 副本一定缺配置（至少缺密钥），先停用；配置齐了再由管理员打开。
     instanceConfig.enabled = false;
     config[instanceCode] = instanceConfig;
-    await writeEncryptedJsonSetting(env, 'plugin_config', settingsEncryptionSecret(env), config);
+    await writeRuntimePluginConfig(env, config);
     invalidatePluginListCache(env);
 
     let channel = null;
@@ -2934,7 +3045,7 @@ async function deletePluginInstanceApi(request, env, pluginCode) {
     if (body.confirm !== true) throw new Error('删除插件副本需要明确确认');
     if (!isPluginInstanceCode(pluginCode)) throw new Error('只能删除插件副本');
     const { registry } = runtimeOf(env);
-    const config = await runtimePluginConfig(env);
+    const config = await runtimePluginConfigWithAssets(env);
     if (!(pluginCode in config)) return jsonResponse({ ok: false, error: '插件副本不存在' }, 404);
     const name = pluginDisplayName(registry, config, pluginCode);
     // 通道离了插件就是条死路由，跟着一起删；历史订单照旧保留。
@@ -2948,7 +3059,7 @@ async function deletePluginInstanceApi(request, env, pluginCode) {
       );
     }
     delete config[pluginCode];
-    await writeEncryptedJsonSetting(env, 'plugin_config', settingsEncryptionSecret(env), config);
+    await writeRuntimePluginConfig(env, config);
     invalidatePluginListCache(env);
     return jsonResponse({
       ok: true,
@@ -2985,7 +3096,7 @@ async function pluginConfigApi(request, env) {
     const hasEnabled = typeof body.enabled === 'boolean';
     const hasInstanceName = typeof body.instance_name === 'string';
     if (!hasValues && !hasEnabled && !hasInstanceName) throw new Error('没有可保存的插件配置');
-    const config = await runtimePluginConfig(env);
+    const config = await runtimePluginConfigWithAssets(env);
     // 副本的存在性由配置说了算。编码是能猜出来的，不该靠猜就凭空多出一个账号位。
     if (isPluginInstanceCode(plugin.manifest.code) && !(plugin.manifest.code in config)) {
       throw new Error('插件副本不存在，请先在插件列表里复制一个');
@@ -3012,7 +3123,7 @@ async function pluginConfigApi(request, env) {
     if (current.enabled === true && missingFields.length) {
       throw new Error(`已启用插件不能缺少配置：${missingFields.join('、')}`);
     }
-    await writeEncryptedJsonSetting(env, 'plugin_config', settingsEncryptionSecret(env), config);
+    await writeRuntimePluginConfig(env, config);
     invalidatePluginListCache(env);
     return jsonResponse({
       ok: true,
