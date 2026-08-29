@@ -67,6 +67,8 @@ const WATCHER_RECEIPT_KEY = 'receipt_watcher';
 const RECEIPT_DISCOVERY_PREFIX = 'receipt_discovery:';
 const PLUGIN_LIST_CACHE_MILLISECONDS = 60_000;
 const PLUGIN_LIST_FAILURE_CACHE_MILLISECONDS = 5_000;
+const SNAPSHOT_MAX_ORDERS_PER_PLUGIN = 200;
+const WATCHER_CONFIG_OMIT_KEYS = new Set(['receipt_qrcode_image']);
 // 管理台插件页会同时读取并解密配置、读取授权状态、合并公开目录。结果按当前运行时
 // 缓存在 isolate 内，既不把含配置值的响应放进共享 HTTP 缓存，也能合并并发冷请求。
 const pluginListCache = new WeakMap();
@@ -1163,13 +1165,32 @@ function watcherChannelPayTypes(channel, plugin) {
   return values.length ? values : [...plugin.manifest.payTypes];
 }
 
-async function receiptWatcherAccounts(env) {
-  await expireDuePayments(env);
+function watcherConfigForPlugin(pluginConfig, pluginCode) {
+  const config = { ...configForPlugin(pluginConfig, pluginCode) };
+  for (const key of WATCHER_CONFIG_OMIT_KEYS) delete config[key];
+  for (const [key, value] of Object.entries(config)) {
+    if (typeof value === 'string' && value.length > 2048 && /(?:image|qrcode)/iu.test(key)) {
+      delete config[key];
+    }
+  }
+  return config;
+}
+
+async function receiptWatcherAccounts(env, options = {}) {
+  const {
+    supportedBaseCodes = null,
+    expire = true,
+    maxOrdersPerPlugin = 0,
+    sanitizeConfig = false,
+  } = options;
+  if (expire) await expireDuePayments(env);
   const { registry } = runtimeOf(env);
+  const supported = supportedBaseCodes instanceof Set ? supportedBaseCodes : null;
   const [pluginConfig, licensed] = await Promise.all([runtimePluginConfig(env), licensedCodes(env)]);
   const channels = (await runtimeChannels(env)).filter((channel) => {
     const plugin = registry.get(channel.plugin_code);
     return channel.enabled && plugin?.manifest.mode === 'channel-notify'
+      && (!supported || supported.has(basePluginCode(channel.plugin_code)))
       && licenseCovers(licensed, channel.plugin_code)
       && pluginEnabled(registry, pluginConfig, channel.plugin_code);
   });
@@ -1188,13 +1209,22 @@ async function receiptWatcherAccounts(env) {
       AND status IN ('PAYING', 'EXPIRED')
       AND expires_at > ?
     )` : '';
+  const limit = Math.max(0, Math.floor(Number(maxOrdersPerPlugin) || 0)) * pluginCodes.length;
+  const limitClause = limit > 0 ? '\n    LIMIT ?' : '';
   const { results } = await env.DB.prepare(`
-    SELECT * FROM payment_attempts
+    SELECT payment_no, external_order_no, plugin_code, expected_amount_fen, currency,
+      status, provider_trade_no, paid_at, expires_at, metadata_json, created_at, updated_at
+    FROM payment_attempts
     WHERE (
       plugin_code IN (${placeholders}) AND status = 'PAYING' AND expires_at > ?
     ) ${graceClause}
-    ORDER BY created_at ASC
-  `).bind(...pluginCodes, now, ...(graceCodes.length ? [...graceCodes, graceCutoff] : [])).all();
+    ORDER BY created_at ASC${limitClause}
+  `).bind(
+    ...pluginCodes,
+    now,
+    ...(graceCodes.length ? [...graceCodes, graceCutoff] : []),
+    ...(limit > 0 ? [limit] : []),
+  ).all();
   const groupedChannels = [...channels.reduce((groups, channel) => {
     if (!groups.has(channel.plugin_code)) groups.set(channel.plugin_code, []);
     groups.get(channel.plugin_code).push(channel);
@@ -1203,8 +1233,11 @@ async function receiptWatcherAccounts(env) {
   const accounts = groupedChannels.map((accountChannels) => {
     const primaryChannel = accountChannels[0];
     const plugin = registry.require(primaryChannel.plugin_code);
+    const pluginAccountConfig = sanitizeConfig
+      ? watcherConfigForPlugin(pluginConfig, primaryChannel.plugin_code)
+      : configForPlugin(pluginConfig, primaryChannel.plugin_code);
     const config = {
-      ...configForPlugin(pluginConfig, primaryChannel.plugin_code),
+      ...pluginAccountConfig,
       plugin_code: primaryChannel.plugin_code,
       api_config_id: primaryChannel.id,
       channel_id: primaryChannel.id,
@@ -1280,6 +1313,7 @@ async function receiptWatcherDiscoveries(env, supported) {
     WHERE setting_key LIKE 'receipt_discovery:%' AND updated_at >= ?
     ORDER BY updated_at ASC
   `).bind(cutoff).all();
+  if (!results.length) return [];
   const config = await runtimePluginConfig(env);
   const discoveries = [];
   for (const row of results) {
@@ -1296,7 +1330,7 @@ async function receiptWatcherDiscoveries(env, supported) {
     `).bind(nextValue, timestamp(), row.setting_key, row.value_text).run();
     if (Number(claimed.meta?.changes ?? 0) !== 1) continue;
     discoveries.push({
-      ...receiptDiscoveryAccount(pluginCode, configForPlugin(config, pluginCode)),
+      ...receiptDiscoveryAccount(pluginCode, watcherConfigForPlugin(config, pluginCode)),
       request_id: job.request_id,
     });
   }
@@ -1330,10 +1364,21 @@ async function watcherSnapshot(request, env) {
     Date.now(),
     { kind: watcherKind },
   );
+  if (!capabilities.length) {
+    return jsonResponse(
+      { generated_at: timestamp(), poll_seconds: 15, accounts: [], discoveries: [] },
+      200,
+      { 'cache-control': 'no-store' },
+    );
+  }
   const supported = new Set(capabilities);
   const [accounts, discoveries] = await Promise.all([
-    receiptWatcherAccounts(env)
-      .then((items) => items.filter((account) => supported.has(basePluginCode(account.plugin_code)))),
+    receiptWatcherAccounts(env, {
+      supportedBaseCodes: supported,
+      expire: false,
+      maxOrdersPerPlugin: SNAPSHOT_MAX_ORDERS_PER_PLUGIN,
+      sanitizeConfig: true,
+    }),
     receiptWatcherDiscoveries(env, supported),
   ]);
   return jsonResponse(
