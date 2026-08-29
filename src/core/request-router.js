@@ -1355,6 +1355,13 @@ async function watcherSnapshot(request, env) {
   const watcherKind = ['docker', 'yyb_bridge'].includes(declaredKind)
     ? declaredKind
     : (/^yyb-bridge-/u.test(instanceId) ? 'yyb_bridge' : 'docker');
+  // 认领了确切通道的实例（应用宝桥接一个进程只盯一份插件配置）报上来，掉线告警就
+  // 按通道归属，不再把同一插件下别的账号一并算成停摆——一个微信掉线不代表另一个也掉。
+  // 官方 Watcher 一个进程包揽整个平台，不报这个头，仍按插件归属，行为不变。
+  const declaredChannels = String(request.headers.get('x-edgepay-watcher-channels') ?? '')
+    .split(',')
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isSafeInteger(value) && value > 0);
   // 每个 Watcher 实例各写各的行，读的时候取并集：同时跑两个 Watcher 时
   // 不会再互相把对方声明的插件冲掉。详见 watcher-presence.js。
   await recordWatcherPresence(
@@ -1362,7 +1369,7 @@ async function watcherSnapshot(request, env) {
     await presenceKey(instanceId, capabilities),
     capabilities,
     Date.now(),
-    { kind: watcherKind },
+    { kind: watcherKind, channelIds: declaredChannels },
   );
   if (!capabilities.length) {
     return jsonResponse(

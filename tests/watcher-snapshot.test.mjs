@@ -110,7 +110,7 @@ function payment(index, overrides = {}) {
   };
 }
 
-async function snapshotRequest(pluginCodes = 'wxpay_receipt') {
+async function snapshotRequest(pluginCodes = 'wxpay_receipt', channels = '') {
   const timestamp = String(Math.floor(Date.now() / 1_000));
   const path = '/api/watcher/snapshot';
   const signature = await hmacSha256Base64(SNAPSHOT_SECRET, `${timestamp}.GET.${path}.`);
@@ -121,6 +121,7 @@ async function snapshotRequest(pluginCodes = 'wxpay_receipt') {
       'x-edgepay-watcher-plugins': pluginCodes,
       'x-edgepay-watcher-kind': 'yyb_bridge',
       'x-edgepay-watcher-instance': 'yyb-bridge-test',
+      ...(channels ? { 'x-edgepay-watcher-channels': channels } : {}),
     },
   });
 }
@@ -203,4 +204,33 @@ test('watcher 快照不下发大图配置并限制单插件订单数量', async 
   assert.equal(account.config.sms_forwarder_secret, 'sms-secret');
   assert.equal(account.config.plugin_code, 'wxpay_receipt');
   assert.ok(JSON.stringify(payload).length < 60_000);
+});
+
+// 应用宝桥接一个进程只盯一份插件配置，掉线时只有它那条通道会停摆。它自报通道号之后，
+// presence 行里带上 channel_ids，告警才能按通道点名；否则会退回按插件列出同平台的
+// 全部账号，把另一个还在正常收款的微信也写进"到账不会被确认"的名单里。
+test('自报通道的监听端，在线状态按通道记录', async () => {
+  const worker = createTestWorker();
+  const env = await snapshotEnv();
+
+  await worker.fetch(await snapshotRequest('wxpay_receipt', '1'), env, { waitUntil() {} });
+
+  const row = [...env.DB.settings.entries()]
+    .find(([key]) => key.startsWith('watcher_presence:id:yyb-bridge-test'));
+  assert.ok(row, '应当按自报实例写一行 presence');
+  const presence = JSON.parse(row[1]);
+  assert.deepEqual(presence.channel_ids, [1]);
+  assert.equal(presence.kind, 'yyb_bridge');
+});
+
+test('没自报通道的监听端，在线状态不写 channel_ids，仍按插件归属', async () => {
+  const worker = createTestWorker();
+  const env = await snapshotEnv();
+
+  await worker.fetch(await snapshotRequest('wxpay_receipt'), env, { waitUntil() {} });
+
+  const row = [...env.DB.settings.entries()]
+    .find(([key]) => key.startsWith('watcher_presence:id:yyb-bridge-test'));
+  assert.ok(row);
+  assert.equal('channel_ids' in JSON.parse(row[1]), false);
 });

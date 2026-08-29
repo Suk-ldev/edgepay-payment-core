@@ -14,15 +14,29 @@ function invalidateEncryptedCache(settingKey) {
   }
 }
 
+// atob/btoa 只认"一字符一字节"的字符串，和 Uint8Array 之间必须逐字节搬。
+// 这两个函数看着像样板代码，但 plugin_config 的密文有几百 KB（收款码图片就存在里面），
+// 逐字节的写法在这里是致命的：`Uint8Array.from(binary, cb)` 要为每个字节调一次回调，
+// 实测 560 KB 密文要 24 ms，而免费版 Worker 每请求只有 10 ms CPU——缓存一过期，
+// 下一个读配置的请求就必然被砍成 Error 1102，而且它死在写回缓存之前，
+// 于是后续请求接着解密、接着死。监听端看到的 503 全部出自这里。
+// 预分配 + 下标循环把同样的事压到 1.3 ms。写侧同理，按块喂 String.fromCharCode，
+// 与 alipay-plugin.js / poller-runtime.js 里的写法保持一致。
+const BASE64_CHUNK_BYTES = 0x8000;
+
 function toBase64(bytes) {
   let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_BYTES) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_BYTES));
+  }
   return btoa(binary);
 }
 
 function fromBase64(value) {
   const binary = atob(String(value));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 async function encryptionKey(secret) {
