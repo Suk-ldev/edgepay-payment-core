@@ -243,19 +243,38 @@ test('原 MPay 收银台路由、跳转展示和银行卡换通道合同保持�
   );
 });
 
-test('收银台接口会把已过期支付单真实落为超时状态', async () => {
+test('收银台接口把已过期支付单显示为超时，但不为此写库', async () => {
+  // 这两个公开接口以前每次都先跑一遍 expireDuePayments()——一条
+  // `UPDATE payment_attempts WHERE status IN (...) AND expires_at <= ?` 的全表写，
+  // 挂在收银台状态轮询这条最热的路径上，每个盯着二维码的付款人都在持续触发。
+  // 置位归 cron 的过期扫描管（那边是权威，且只在有活时才醒），读接口按读到的
+  // 这一行就地判断即可。
   const { env } = await fixture();
   env.DB.payment.expires_at = '2020-01-01T00:00:00.000Z';
-  const response = await worker.fetch(
-    new Request('https://pay.example/api/cashier/pay-order-status?pay_no=p_cashiercontract'),
-    env,
-    { waitUntil() {} },
-  );
-  const payload = await response.json();
+  const ctx = { waitUntil() {} };
+  const url = 'https://pay.example/api/cashier/pay-order-status?pay_no=p_cashiercontract';
+  const payload = await (await worker.fetch(new Request(url), env, ctx)).json();
+
   assert.equal(payload.code, 200);
   assert.equal(payload.data.status_text, '已超时');
-  assert.equal(env.DB.payment.status, 'EXPIRED');
-  assert.ok(payload.data.timeout_at);
+  // cron 还没置位，所以 updated_at 仍是旧的，timeout_at 只能取到期时刻。
+  assert.equal(payload.data.timeout_at, '2020-01-01T00:00:00.000Z');
+  assert.equal(env.DB.payment.status, 'PAYING', '读接口不该为了显示状态去写库');
+
+  // 订单详情接口给出同样的判断。
+  const order = await (await worker.fetch(
+    new Request('https://pay.example/api/cashier/pay-order?pay_no=p_cashiercontract'),
+    env,
+    ctx,
+  )).json();
+  assert.equal(order.data.order.status_text, '已超时');
+  assert.equal(env.DB.payment.status, 'PAYING');
+
+  // 没到期的单子不受影响。
+  env.DB.payment.expires_at = '2999-01-01T00:00:00.000Z';
+  const live = await (await worker.fetch(new Request(url), env, ctx)).json();
+  assert.equal(live.data.status_text, '支付中');
+  assert.equal(live.data.timeout_at, '');
 });
 
 test('收银台确认和在线证明接口拒绝超限 JSON 请求体', async () => {

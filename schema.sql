@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS payment_attempts (
 CREATE INDEX IF NOT EXISTS idx_payment_attempts_plugin_status_expire
   ON payment_attempts(plugin_code, status, expires_at);
 
+-- 过期扫描（expireDuePayments）按 status + expires_at 取，不带 plugin_code，
+-- 上面那条索引的前导列用不上，只能全表扫。订单表只增不减，扫描成本一直在涨。
+CREATE INDEX IF NOT EXISTS idx_payment_attempts_status_expire
+  ON payment_attempts(status, expires_at);
+
 -- 收款信号先以 source + event_id 去重；任何重复投递都不会重复改变订单状态。
 CREATE TABLE IF NOT EXISTS receipt_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

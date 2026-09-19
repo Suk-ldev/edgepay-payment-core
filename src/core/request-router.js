@@ -40,6 +40,10 @@ import {
 } from '../runtime-keys.js';
 import { pluginSupportsWorkerPoll, unsupportedHook } from '../plugin-api.js';
 import { pollReceiptAccount, workerPollerAvailable } from '../receipt-poller.js';
+import {
+  WATCHER_FAILOVER_STATE_KEY, countAvailableChannelsByPayType, normalizeWatcherFailoverState,
+  planWatcherFailovers, reconcileWatcherFailoverState, trackedWatcherFailoverChannelIds,
+} from '../watcher-failover.js';
 import { decodeWechatXml, exchangeWechatOAuthCode } from '../wechat-v2-plugin.js';
 import {
   receiptDiscoveryAccount, receiptDiscoveryAvailable, sanitizeReceiptDiscoveryRecords,
@@ -48,7 +52,7 @@ import { fetchBundledAsset } from '../bundled-assets.js';
 import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
 import {
   PRESENCE_PREFIX, PRESENCE_SWEEP_MS, PRESENCE_TTL_MS,
-  clearWatcherPresence, liveWatcherInstances, onlineWatcherPlugins, presenceKey, recordWatcherPresence,
+  clearWatcherPresence, liveWatcherCoverage, onlineWatcherPlugins, presenceKey, recordWatcherPresence,
   staleWatcherInstances, watcherChannelPresence, watcherSystemStatus,
 } from '../watcher-presence.js';
 import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
@@ -72,6 +76,7 @@ const WATCHER_CONFIG_OMIT_KEYS = new Set(['receipt_qrcode_image']);
 // 管理台插件页会同时读取并解密配置、读取授权状态、合并公开目录。结果按当前运行时
 // 缓存在 isolate 内，既不把含配置值的响应放进共享 HTTP 缓存，也能合并并发冷请求。
 const pluginListCache = new WeakMap();
+const pluginSummaryCache = new WeakMap();
 
 /** 按编码取插件；不存在（没买或没打进这次构建）就报错。 */
 function pluginOf(env, code) {
@@ -1707,31 +1712,83 @@ function channelAlertLabel(registry, config, channel) {
   return `#${channel.id} ${channel.name}（${name} · 配置 ${number}）`;
 }
 
-/**
- * 监听器掉线会影响哪几条通道。
- *
- * Watcher 声明的能力是基础编码，但同一个平台可能挂着好几份配置、好几条通道，
- * 它们会一起停摆。只报插件编码的话，管理员还得自己回去数哪几条通道用了它。
- */
-async function channelsAffectedByPlugins(env, basePlugins) {
-  const wanted = new Set(basePlugins.map((code) => basePluginCode(code)));
-  if (!wanted.size) return [];
-  const { registry } = runtimeOf(env);
-  const [channels, config] = await Promise.all([runtimeChannels(env), runtimePluginConfig(env)]);
-  return channels
-    .filter((channel) => channel.enabled && wanted.has(basePluginCode(channel.plugin_code)))
-    .map((channel) => channelAlertLabel(registry, config, channel));
+function watcherOfflineListenerName(kind) {
+  return {
+    android: 'Android到账监听',
+    yyb_bridge: '应用宝监听',
+    docker: 'Docker监听器',
+  }[kind] ?? '到账监听器';
 }
 
-/** 手机心跳绑定的是确切通道，不把同一插件的其它账号一并报成掉线。 */
-async function channelsAffectedByIds(env, channelIds) {
-  const wanted = new Set(channelIds.map(Number));
-  if (!wanted.size) return [];
-  const { registry } = runtimeOf(env);
-  const [channels, config] = await Promise.all([runtimeChannels(env), runtimePluginConfig(env)]);
-  return channels
-    .filter((channel) => channel.enabled && wanted.has(Number(channel.id)))
-    .map((channel) => channelAlertLabel(registry, config, channel));
+/** 掉线告警使用紧凑标签，手机通知第一屏就能放下通道、账号和配置编号。 */
+function watcherOfflineChannelLabel(registry, config, channel) {
+  const number = pluginConfigNumber(channel.plugin_code);
+  const name = pluginDisplayName(registry, config, channel.plugin_code);
+  return `#${channel.id}${channel.name}（${name} · 配置${number}）`;
+}
+
+export function watcherFailoverMessage(registry, config, failover, remainingByPayType) {
+  const {
+    item, affected, channelsWithListenerBackup, channelsWithWorkerBackup, channelsToDisable,
+  } = failover;
+  const listenerName = watcherOfflineListenerName(item.kind);
+  const minutes = Math.max(1, Math.floor(item.silentMs / 60_000));
+  const prefix = `${listenerName}已${minutes}分钟没有上报`;
+  if (!affected.length) {
+    return `${prefix}，当前没有启用中的受影响通道。受影响插件：${item.plugins.join('、') || '未知'}`;
+  }
+
+  const sections = [];
+  if (channelsToDisable.length) {
+    const lines = channelsToDisable.map((channel) => {
+      const payType = String(channel.pay_types?.[0] ?? '');
+      return `${watcherOfflineChannelLabel(registry, config, channel)}`
+        + `，${cashierTypeName(payType)}剩余可用通道数：${Number(remainingByPayType[payType] ?? 0)}`;
+    });
+    sections.push(`这期间以下通道的到账不会被确认，已自动停用：\n${lines.join('\n')}`);
+  }
+  if (channelsWithWorkerBackup.length) {
+    const lines = channelsWithWorkerBackup
+      .map((channel) => watcherOfflineChannelLabel(registry, config, channel));
+    sections.push(`以下通道存在 Worker 后备，仅上报告警、不停用通道：\n${lines.join('\n')}`);
+  }
+  if (channelsWithListenerBackup.length) {
+    const lines = channelsWithListenerBackup
+      .map((channel) => watcherOfflineChannelLabel(registry, config, channel));
+    sections.push(`以下通道仍有其他在线监听实例覆盖，仅上报告警、不停用通道：\n${lines.join('\n')}`);
+  }
+  return `${prefix}，${sections.join('\n')}`;
+}
+
+/** 通道开关和自动停用归属必须同批写入，避免只写成功一半后无法自动恢复。 */
+async function writeWatcherFailoverRuntime(env, channels, state, changes, now) {
+  const statements = [];
+  const updatedAt = new Date(now).toISOString();
+  if (changes.state) {
+    if (Object.keys(state.channels).length) {
+      statements.push(env.DB.prepare(`
+        INSERT INTO runtime_settings (setting_key, value_text, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(setting_key) DO UPDATE SET
+          value_text = excluded.value_text,
+          updated_at = excluded.updated_at
+      `).bind(WATCHER_FAILOVER_STATE_KEY, JSON.stringify(state), updatedAt));
+    } else {
+      statements.push(env.DB.prepare(
+        'DELETE FROM runtime_settings WHERE setting_key = ?',
+      ).bind(WATCHER_FAILOVER_STATE_KEY));
+    }
+  }
+  if (changes.channels) {
+    statements.push(env.DB.prepare(`
+      INSERT INTO runtime_settings (setting_key, value_text, updated_at)
+      VALUES ('channels', ?, ?)
+      ON CONFLICT(setting_key) DO UPDATE SET
+        value_text = excluded.value_text,
+        updated_at = excluded.updated_at
+    `).bind(JSON.stringify(channels), updatedAt));
+  }
+  if (statements.length) await env.DB.batch(statements);
 }
 
 /**
@@ -1740,32 +1797,60 @@ async function channelsAffectedByIds(env, channelIds) {
  * 判据是"上报过、但已经超过存活窗口没再上报"——从没上报过的实例不算掉线，
  * 否则没装 Watcher 的部署会一直收到告警。恢复上报时清掉静默期。
  */
-async function checkWatcherLiveness(env, now = Date.now()) {
-  const stale = await staleWatcherInstances(env, now);
+export async function checkWatcherLiveness(env, now = Date.now()) {
+  const { registry } = runtimeOf(env);
+  const [stale, liveWatchers, channels, config, storedState, licensed] = await Promise.all([
+    staleWatcherInstances(env, now),
+    liveWatcherCoverage(env, now),
+    runtimeChannels(env),
+    runtimePluginConfig(env),
+    readPlainJsonSetting(env, WATCHER_FAILOVER_STATE_KEY, {}),
+    licensedCodes(env),
+  ]);
+  const currentState = normalizeWatcherFailoverState(storedState);
+  const failovers = planWatcherFailovers(registry, config, channels, stale, {
+    trackedChannelIds: trackedWatcherFailoverChannelIds(currentState),
+    liveWatchers,
+    licensedBaseCodes: licensed,
+  });
+  const liveKeys = liveWatchers.map(({ key }) => key);
+  const reconciliation = reconcileWatcherFailoverState(currentState, failovers, liveKeys, now);
+  const restoreChannelIds = new Set(reconciliation.restoreChannelIds);
+  const nextChannels = failovers.nextChannels.map((channel) => (
+    restoreChannelIds.has(Number(channel.id)) ? { ...channel, enabled: true } : channel
+  ));
+  const channelsChanged = JSON.stringify(nextChannels) !== JSON.stringify(channels);
+  const stateChanged = JSON.stringify(reconciliation.state) !== JSON.stringify(currentState);
+  await writeWatcherFailoverRuntime(
+    env,
+    nextChannels,
+    reconciliation.state,
+    { channels: channelsChanged, state: stateChanged },
+    now,
+  );
+  const disabledPayTypes = new Set(failovers.items.flatMap(({ channelsToDisable }) => (
+    channelsToDisable.flatMap((channel) => channel.pay_types ?? [])
+  )));
+  const remainingByPayType = countAvailableChannelsByPayType(
+    registry,
+    config,
+    nextChannels,
+    disabledPayTypes,
+    licensed,
+  );
   const secret = settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '');
-  for (const item of stale) {
-    const minutes = Math.round(item.silentMs / 60_000);
-    const affected = await (item.channelIds.length
-      ? channelsAffectedByIds(env, item.channelIds)
-      : channelsAffectedByPlugins(env, item.plugins)).catch(() => []);
-    const listenerName = {
-      android: 'Android 到账监听',
-      yyb_bridge: '应用宝监听器',
-      docker: 'Docker Watcher',
-    }[item.kind] ?? '监听器';
+  for (const failover of failovers.items) {
+    const { item } = failover;
+    const listenerName = watcherOfflineListenerName(item.kind);
     await emitAlert(env, {
       event: `watcher_offline:${item.key}`,
       level: 'critical',
       title: `EdgePay ${listenerName}掉线`,
-      message: `${listenerName}已 ${minutes} 分钟没有上报，这期间以下通道的到账不会被确认：\n`
-        + (affected.length
-          ? affected.join('\n')
-          : `（暂无启用中的通道）受影响的插件：${item.plugins.join('、') || '未知'}`),
+      message: watcherFailoverMessage(registry, config, failover, remainingByPayType),
     }, { secret, now });
   }
   // 恢复销案：还在线的实例，把它上一次掉线的静默期清掉，下次再掉能立刻告警。
-  const live = await liveWatcherInstances(env, now);
-  for (const key of live) await clearAlert(env, `watcher_offline:${key}`).catch(() => {});
+  for (const key of liveKeys) await clearAlert(env, `watcher_offline:${key}`).catch(() => {});
 }
 
 async function licenseAttestationApi(request, env) {
@@ -2368,6 +2453,24 @@ function cashierApiResponse(data, status = 200) {
   return jsonResponse({ code: status === 200 ? 200 : status, msg: status === 200 ? 'success' : String(data), data: status === 200 ? data : null }, status);
 }
 
+/**
+ * 这一行订单此刻对外该显示成什么状态——只读，不写库。
+ *
+ * 收银台的两个公开接口以前每次都先跑一遍 expireDuePayments()，那是一条
+ * `UPDATE payment_attempts WHERE status IN (...) AND expires_at <= ?` 的全表写：
+ * 现有索引前导列是 plugin_code，这条语句用不上，只能全表扫；而且写要落到 D1 主库，
+ * 没法走读副本。偏偏它挂在收银台状态轮询这条最热的路径上，每个盯着二维码的付款人
+ * 都在持续触发它，订单表越大越慢。
+ *
+ * 置位本来就不归这两个接口管——cron 的过期扫描才是权威。所以这里只按读到的这一行
+ * 就地判断，让前端早几十秒看到"已超时"，库由 cron 去改。
+ */
+function effectivePaymentStatus(payment, now = timestamp()) {
+  const status = String(payment?.status ?? '');
+  if (!['PENDING', 'PAYING'].includes(status)) return status;
+  return String(payment?.expires_at ?? '') <= now ? 'EXPIRED' : status;
+}
+
 function cashierStatus(status) {
   return {
     PENDING: [0, '待创建'],
@@ -2654,7 +2757,6 @@ async function signedMerchantReturnUrl(payment, metadata, env) {
 
 async function cashierPayOrderApi(request, env) {
   try {
-    await expireDuePayments(env);
     const payNo = String(new URL(request.url).searchParams.get('pay_no') ?? '').trim();
     const payment = await env.DB.prepare(
       'SELECT * FROM payment_attempts WHERE payment_no = ?',
@@ -2666,7 +2768,7 @@ async function cashierPayOrderApi(request, env) {
       metadata.presentation,
       Math.floor(Date.now() / 1_000),
     );
-    const status = cashierStatus(payment.status);
+    const status = cashierStatus(effectivePaymentStatus(payment));
     return cashierApiResponse({
       order: {
         pay_no: payment.payment_no,
@@ -2705,21 +2807,24 @@ async function cashierPayOrderApi(request, env) {
 
 async function cashierPayOrderStatusApi(request, env) {
   try {
-    await expireDuePayments(env);
     const payNo = String(new URL(request.url).searchParams.get('pay_no') ?? '').trim();
     const payment = await env.DB.prepare(
       'SELECT * FROM payment_attempts WHERE payment_no = ?',
     ).bind(payNo).first();
     if (!payment) return cashierApiResponse('支付单不存在', 404);
-    const status = cashierStatus(payment.status);
+    const effective = effectivePaymentStatus(payment);
+    const status = cashierStatus(effective);
     return cashierApiResponse({
       pay_no: payment.payment_no,
       status: status[0],
       status_text: status[1],
       paid_at: payment.paid_at ?? '',
-      closed_at: payment.status === 'CLOSED' ? payment.updated_at : '',
-      failed_at: payment.status === 'FAILED' ? payment.updated_at : '',
-      timeout_at: payment.status === 'EXPIRED' ? payment.updated_at : '',
+      closed_at: effective === 'CLOSED' ? payment.updated_at : '',
+      failed_at: effective === 'FAILED' ? payment.updated_at : '',
+      // cron 还没来得及置位时 updated_at 还是旧的，用到期时刻才说得准。
+      timeout_at: effective === 'EXPIRED'
+        ? (payment.status === 'EXPIRED' ? payment.updated_at : payment.expires_at)
+        : '',
       updated_at: payment.updated_at,
     });
   } catch (error) {
@@ -2865,13 +2970,12 @@ function catalogPluginRow(item, licensed = false) {
   };
 }
 
-async function pluginConfigPayload(env) {
+async function pluginConfigPayload(env, { summary = false } = {}) {
   const runtime = runtimeOf(env);
   const { registry } = runtime;
-  // 插件页要把每个插件当前的收款码显示出来，这里整份补水。管理台是低频页面，
-  // 值得为此多解几行 asset；热路径读的仍是不含图片的主配置。
+  // 列表只需要状态和清单；编辑单个插件时再读取其图片。保留完整响应兼容旧页面。
   const [config, license] = await Promise.all([
-    runtimePluginConfigWithAssets(env), runtime.license.state(env, registry),
+    summary ? runtimePluginConfig(env) : runtimePluginConfigWithAssets(env), runtime.license.state(env, registry),
   ]);
   const licensed = new Set(license.plugins);
   // 已购但没装进这次构建的插件：按权益出货后，新买的插件要去 Deploy 站升级一次才会进包。
@@ -2889,7 +2993,7 @@ async function pluginConfigPayload(env) {
   }
   return {
     results,
-    forms: adminPluginForms(registry, config)
+    forms: summary ? [] : adminPluginForms(registry, config)
       .filter((form) => licenseCovers(licensed, form.code))
       .map((form) => ({ ...form, licensed: true })),
     storage: 'D1 AES-GCM / CONFIG_ENCRYPTION_KEY',
@@ -2899,35 +3003,37 @@ async function pluginConfigPayload(env) {
   };
 }
 
-async function cachedPluginConfigPayload(env) {
+async function cachedPluginConfigPayload(env, { summary = false } = {}) {
   const runtime = runtimeOf(env);
+  const cache = summary ? pluginSummaryCache : pluginListCache;
   const now = Date.now();
-  const cached = pluginListCache.get(runtime);
+  const cached = cache.get(runtime);
   if (cached?.expiresAt > now) {
     return { payload: await cached.promise, cacheStatus: 'HIT' };
   }
 
   const entry = {
     expiresAt: now + PLUGIN_LIST_CACHE_MILLISECONDS,
-    promise: pluginConfigPayload(env),
+    promise: pluginConfigPayload(env, { summary }),
   };
-  pluginListCache.set(runtime, entry);
+  cache.set(runtime, entry);
   try {
     const payload = await entry.promise;
     // 授权服务故障的降级结果只短暂缓存，避免恢复后仍长时间显示“未购买”。
     const ttl = payload.license?.retryable
       ? PLUGIN_LIST_FAILURE_CACHE_MILLISECONDS
       : PLUGIN_LIST_CACHE_MILLISECONDS;
-    if (pluginListCache.get(runtime) === entry) entry.expiresAt = Date.now() + ttl;
+    if (cache.get(runtime) === entry) entry.expiresAt = Date.now() + ttl;
     return { payload, cacheStatus: 'MISS' };
   } catch (error) {
-    if (pluginListCache.get(runtime) === entry) pluginListCache.delete(runtime);
+    if (cache.get(runtime) === entry) cache.delete(runtime);
     throw error;
   }
 }
 
 function invalidatePluginListCache(env) {
   pluginListCache.delete(runtimeOf(env));
+  pluginSummaryCache.delete(runtimeOf(env));
 }
 
 function assertInstanceName(value) {
@@ -3076,7 +3182,22 @@ async function deletePluginInstanceApi(request, env, pluginCode) {
 async function pluginConfigApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method === 'GET') {
-    const { payload, cacheStatus } = await cachedPluginConfigPayload(env);
+    const query = new URL(request.url).searchParams;
+    const pluginCode = query.get('plugin_code');
+    if (pluginCode) {
+      const { registry } = runtimeOf(env);
+      if (!registry.get(pluginCode)) return jsonResponse({ error: '插件不存在' }, 404);
+      if (!licenseCovers(await licensedCodes(env), pluginCode)) {
+        return jsonResponse({ error: '该插件尚未购买' }, 403);
+      }
+      const config = await runtimePluginConfigWithAssets(env, pluginCode);
+      if (isPluginInstanceCode(pluginCode) && !(pluginCode in config)) {
+        return jsonResponse({ error: '插件副本不存在' }, 404);
+      }
+      const form = adminPluginForms(registry, config).find((item) => item.code === pluginCode);
+      return jsonResponse({ form });
+    }
+    const { payload, cacheStatus } = await cachedPluginConfigPayload(env, { summary: query.get('view') === 'summary' });
     const response = jsonResponse(payload);
     response.headers.set('x-edgepay-cache', cacheStatus);
     return response;
@@ -3696,13 +3817,23 @@ async function scheduledWork(env, registry, now = Date.now()) {
         WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?) AS due_notifications,
       (SELECT COUNT(*) FROM runtime_settings
         WHERE (setting_key = 'watcher_presence' OR setting_key LIKE ?)
-          AND updated_at < ? AND updated_at > ?) AS silent_watchers
-  `).bind(graceCutoff, timestamp(), `${PRESENCE_PREFIX}%`, offlineBefore, forgetBefore).first();
+          AND updated_at < ? AND updated_at > ?) AS silent_watchers,
+      (SELECT COUNT(*) FROM runtime_settings
+        WHERE setting_key = ?) AS watcher_failovers
+  `).bind(
+    graceCutoff,
+    timestamp(),
+    `${PRESENCE_PREFIX}%`,
+    offlineBefore,
+    forgetBefore,
+    WATCHER_FAILOVER_STATE_KEY,
+  ).first();
   return {
     hasPaymentWork: Number(row?.open_payments ?? 0)
       + Number(row?.grace_payments ?? 0)
       + Number(row?.due_notifications ?? 0) > 0,
-    hasSilentWatcher: Number(row?.silent_watchers ?? 0) > 0,
+    hasWatcherWork: Number(row?.silent_watchers ?? 0)
+      + Number(row?.watcher_failovers ?? 0) > 0,
   };
 }
 
@@ -3721,10 +3852,10 @@ export function createHandlers(runtime) {
         // 先花一次计数查询问清楚有没有活；都没有就到此为止，
         // 后面那一整套（密钥解密、通道与插件配置、授权状态、两遍订单扫描）全省掉。
         const work = await scheduledWork(env, runtime.registry);
-        if (!work.hasPaymentWork && !work.hasSilentWatcher) return;
+        if (!work.hasPaymentWork && !work.hasWatcherWork) return;
         const runtimeEnv = await prepare(env);
         // 掉线巡检不该拖垮这一轮的正事，失败只记日志。
-        if (work.hasSilentWatcher) {
+        if (work.hasWatcherWork) {
           await checkWatcherLiveness(runtimeEnv).catch((error) => {
             console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
           });

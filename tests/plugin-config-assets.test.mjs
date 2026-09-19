@@ -72,8 +72,8 @@ class MemoryDatabase {
 // 加密配置在 isolate 内按 setting+密钥缓存，同一把密钥会让相邻用例互相看见对方的配置。
 let configKeySequence = 0;
 
-async function fixture() {
-  const worker = createTestWorker();
+async function fixture(options) {
+  const worker = createTestWorker(options);
   configKeySequence += 1;
   const configKey = `plugin-asset-config-key-${configKeySequence}`;
   const env = {
@@ -221,4 +221,50 @@ test('还没拆分的老配置照常能读出收款码', async () => {
   const form = payload.forms.find((item) => item.code === 'wxpay_receipt');
   assert.deepEqual(form.missingFields, []);
   assert.equal(form.fields.find((item) => item.key === 'receipt_qrcode_image').value, QRCODE);
+});
+
+test('插件摘要不读取图片，也不把图片塞进列表响应；单插件读取只解密目标图片', async () => {
+  const { env, call, seedConfig } = await fixture();
+  await seedConfig({
+    wxpay_receipt: { sms_forwarder_secret: 'sms-secret', receipt_qrcode_image: ASSET_MARKER },
+    fubei_receipt: { receipt_qrcode_image: ASSET_MARKER },
+  });
+  env.DB.settings.set(assetKey('wxpay_receipt', 'receipt_qrcode_image'), await encryptSetting(
+    { value: QRCODE }, env.CONFIG_ENCRYPTION_KEY, assetKey('wxpay_receipt', 'receipt_qrcode_image'),
+  ));
+  // 另一张图片损坏也不能阻止列表或所选插件的表单加载。
+  env.DB.settings.set(assetKey('fubei_receipt', 'receipt_qrcode_image'), 'invalid ciphertext');
+  const summary = await call('/admin/api/plugins?view=summary');
+  assert.equal(summary.status, 200);
+  const body = await summary.text();
+  assert.ok(body.length < 50_000);
+  assert.ok(!body.includes(QRCODE));
+  const payload = JSON.parse(body);
+  assert.deepEqual(payload.forms, []);
+  assert.equal(payload.results.find((item) => item.code === 'wxpay_receipt').configured, true);
+
+  const detail = await call('/admin/api/plugins?plugin_code=wxpay_receipt');
+  assert.equal(detail.status, 200);
+  const { form } = await detail.json();
+  assert.equal(form.fields.find((field) => field.key === 'receipt_qrcode_image').value, QRCODE);
+  assert.equal(form.fields.find((field) => field.key === 'sms_forwarder_secret').value, '');
+});
+
+test('完整列表和摘要分别缓存，修改配置后摘要状态立即更新', async () => {
+  const { call, savePlugin } = await fixture();
+  await savePlugin('wxpay_receipt', { sms_forwarder_secret: 'sms-secret', receipt_qrcode_image: QRCODE });
+  await call('/admin/api/plugins?view=summary');
+  const full = await (await call('/admin/api/plugins')).json();
+  assert.equal(full.forms.find((form) => form.code === 'wxpay_receipt').fields.find((field) => field.key === 'receipt_qrcode_image').value, QRCODE);
+  await call('/admin/api/plugins', { method: 'PUT', body: JSON.stringify({ plugin_code: 'wxpay_receipt', enabled: false }) });
+  const updated = await (await call('/admin/api/plugins?view=summary')).json();
+  assert.equal(updated.results.find((plugin) => plugin.code === 'wxpay_receipt').enabled, false);
+});
+
+test('单插件表单拒绝不存在、未建立的副本与未授权插件', async () => {
+  const { call } = await fixture();
+  assert.equal((await call('/admin/api/plugins?plugin_code=missing')).status, 404);
+  assert.equal((await call('/admin/api/plugins?plugin_code=wxpay_receipt~2')).status, 404);
+  const denied = await fixture({ license: { async state() { return { plugins: [] }; } } });
+  assert.equal((await denied.call('/admin/api/plugins?plugin_code=wxpay_receipt')).status, 403);
 });

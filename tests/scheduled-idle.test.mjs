@@ -37,7 +37,9 @@ const env = (db) => ({
 });
 
 test('没有待办时 cron 只查一次就返回，不碰密钥和配置', async () => {
-  const db = countingDb({ open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 0 });
+  const db = countingDb({
+    open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 0, watcher_failovers: 0,
+  });
   const pending = [];
   await worker.scheduled({ cron: '* * * * *' }, env(db), { waitUntil: (p) => pending.push(p) });
   await Promise.all(pending);
@@ -74,7 +76,9 @@ test('三类待办各自都能把 cron 唤醒', async () => {
 test('监听器掉线也能唤醒 cron——哪怕一张待支付订单都没有', async () => {
   // 这正是掉线告警最该发出的时刻：没有单在跑，谁也不会注意到监听器已经没了。
   // 掉线检测并在同一条计数查询里，所以空跑仍然只有一次查询。
-  const db = countingDb({ open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 1 });
+  const db = countingDb({
+    open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 1, watcher_failovers: 0,
+  });
   const pending = [];
   await worker.scheduled({ cron: '* * * * *' }, env(db), { waitUntil: (p) => pending.push(p) });
   await Promise.all(pending);
@@ -85,8 +89,20 @@ test('监听器掉线也能唤醒 cron——哪怕一张待支付订单都没有
   );
 });
 
+test('存在自动停用状态时继续唤醒 cron，以便监听器上线后恢复通道', async () => {
+  const db = countingDb({
+    open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 0, watcher_failovers: 1,
+  });
+  const pending = [];
+  await worker.scheduled({ cron: '* * * * *' }, env(db), { waitUntil: (p) => pending.push(p) });
+  await Promise.all(pending);
+  assert.ok(db.sql.length > 1, '有自动停用状态时不该提前返回');
+});
+
 test('计数查询同时问出待办和掉线，空跑不额外加查询', async () => {
-  const db = countingDb({ open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 0 });
+  const db = countingDb({
+    open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 0, watcher_failovers: 0,
+  });
   const pending = [];
   await worker.scheduled({ cron: '* * * * *' }, env(db), { waitUntil: (p) => pending.push(p) });
   await Promise.all(pending);
@@ -94,4 +110,5 @@ test('计数查询同时问出待办和掉线，空跑不额外加查询', async
   // 同一条里既数订单，也数沉默的监听器
   assert.match(db.sql[0], /open_payments/u);
   assert.match(db.sql[0], /silent_watchers/u);
+  assert.match(db.sql[0], /watcher_failovers/u);
 });

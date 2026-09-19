@@ -61,6 +61,46 @@ function fingerprintHtmlReferences(html, assets) {
   return result;
 }
 
+/**
+ * 资源响应逻辑。原样写进生成文件，所以这里是字符串而不是函数。
+ *
+ * 两件事以前没做，代价都落在付款人身上：
+ *
+ * 1. 设了 ETag 却从不看 `if-none-match`。浏览器缓存过期后带着 ETag 回来复验，
+ *    仍然被回了整整一份 —— 收银台那个 206 KB 的 cashier.js 每小时重下一次。
+ *    注意 Cloudflare 压缩过的响应会把 ETag 弱化成 `W/"..."` 再发给浏览器，
+ *    浏览器原样带回来，所以比对前要把 `W/` 前缀剥掉，否则永远匹配不上。
+ * 2. 带内容指纹的 URL 只给了 max-age=3600。指纹就是内容哈希，改一个字节就换一个
+ *    URL（见 fingerprintHtmlReferences），这种 URL 本来就该 immutable ——
+ *    只有 `?v=` 与资源自身哈希对得上时才给，避免手敲的查询串骗到一年缓存。
+ *
+ * HTML 仍然 no-store：它是指纹的来源，必须每次都拿最新的。
+ */
+const ASSET_RESPONDER = `export async function fetchBundledAsset(request){
+  const method=String(request.method||'GET').toUpperCase();
+  if(!['GET','HEAD'].includes(method))return new Response('method_not_allowed',{status:405});
+  const url=new URL(request.url);
+  const asset=ASSETS[url.pathname];
+  if(!asset)return new Response('not_found',{status:404,headers:{'cache-control':'no-store'}});
+  const etag='"'+asset.sha256+'"';
+  const immutable=url.searchParams.get('v')===asset.sha256.slice(0,12);
+  const headers={
+    'content-type':asset.type,
+    'x-content-type-options':'nosniff',
+    etag,
+    'cache-control':asset.type.startsWith('text/html')
+      ?'no-store'
+      :(immutable?'public, max-age=31536000, immutable':'public, max-age=3600'),
+  };
+  const conditional=String(request.headers.get('if-none-match')||'');
+  if(conditional&&conditional.split(',').some(candidate=>{
+    const value=candidate.trim().replace(/^W\\//,'');
+    return value==='*'||value===etag;
+  }))return new Response(null,{status:304,headers});
+  return new Response(method==='HEAD'?null:(asset.text??binary(asset.base64)),{status:200,headers});
+}
+`;
+
 async function generate() {
   const rows = [];
   const sources = await filesIn(root);
@@ -95,7 +135,7 @@ async function generate() {
     + `const binaryCache=new Map();\n`
     + `function binary(value){if(binaryCache.has(value))return binaryCache.get(value);const raw=atob(value);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));binaryCache.set(value,bytes);return bytes}\n`
     + `export const BUNDLED_ASSET_PATHS=Object.freeze(Object.keys(ASSETS));\n`
-    + `export async function fetchBundledAsset(request){const method=String(request.method||'GET').toUpperCase();if(!['GET','HEAD'].includes(method))return new Response('method_not_allowed',{status:405});const pathname=new URL(request.url).pathname;const asset=ASSETS[pathname];if(!asset)return new Response('not_found',{status:404,headers:{'cache-control':'no-store'}});const headers={'content-type':asset.type,'x-content-type-options':'nosniff','etag':'"'+asset.sha256+'"','cache-control':asset.type.startsWith('text/html')?'no-store':'public, max-age=3600'};return new Response(method==='HEAD'?null:(asset.text??binary(asset.base64)),{status:200,headers})}\n`;
+    + ASSET_RESPONDER;
 }
 
 const generated = await generate();

@@ -236,15 +236,29 @@ export async function watcherSystemStatus(env, now = Date.now()) {
 
 /** 仍在存活窗口内的实例键。用于恢复后把它那条掉线静默期清掉。 */
 export async function liveWatcherInstances(env, now = Date.now()) {
+  return (await liveWatcherCoverage(env, now)).map(({ key }) => key);
+}
+
+/** 在线实例及其监听范围。掉线处置用它判断同一通道是否仍被其他实例覆盖。 */
+export async function liveWatcherCoverage(env, now = Date.now()) {
   const { results } = await env.DB.prepare(`
-    SELECT setting_key, updated_at FROM runtime_settings
+    SELECT setting_key, value_text, updated_at FROM runtime_settings
     WHERE setting_key = 'watcher_presence' OR setting_key LIKE ?
   `).bind(`${PRESENCE_PREFIX}%`).all();
   const live = [];
   for (const row of results ?? []) {
     const updatedAt = Date.parse(String(row?.updated_at ?? ''));
     if (!Number.isFinite(updatedAt) || now - updatedAt >= PRESENCE_TTL_MS) continue;
-    live.push(String(row.setting_key ?? '').replace(PRESENCE_PREFIX, ''));
+    let parsed;
+    try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
+    live.push({
+      key: String(row.setting_key ?? '').replace(PRESENCE_PREFIX, ''),
+      plugins: Array.isArray(parsed?.plugins) ? parsed.plugins.map(String) : [],
+      channelIds: Array.isArray(parsed?.channel_ids)
+        ? parsed.channel_ids.map(Number).filter((value) => Number.isSafeInteger(value) && value > 0)
+        : [],
+      kind: String(parsed?.kind ?? ''),
+    });
   }
   return live;
 }

@@ -60,6 +60,7 @@ const orderQuery = {
   callback_status: '',
 };
 let activePluginCode = '';
+let pluginEditorSequence = 0;
 let receiptDiscoveryRecords = [];
 let receiptDiscoverySequence = 0;
 let activeOrderAction = null;
@@ -174,21 +175,32 @@ function showNotice(message, state = 'ok') {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...options,
-    headers: {
-      ...(options.body ? { 'content-type': 'application/json' } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
-  if (response.status === 401) {
-    location.replace('/admin/login');
-    throw new Error('unauthorized');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch(path, {
+      credentials: 'same-origin',
+      signal: controller.signal,
+      ...options,
+      headers: {
+        ...(options.body ? { 'content-type': 'application/json' } : {}),
+        ...(options.headers ?? {}),
+      },
+    });
+    if (response.status === 401) {
+      location.replace('/admin/login');
+      throw new Error('unauthorized');
+    }
+    const payload = await response.json().catch(() => ({}));
+    if (controller.signal.aborted) throw new Error('请求超时，请稍后重试');
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('请求超时，请稍后重试');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-  return payload;
 }
 
 const VERSION_UPDATE_SNOOZE_COOKIE = 'edgepay_version_update_snoozed';
@@ -1198,10 +1210,26 @@ function fillReceiptIdentifiers(index) {
   pluginReceiptDiscoveryStatus.textContent = '编号已填入上方表单；请核对目标码牌、商户和门店无误后点击“保存插件配置”。';
 }
 
-function openPluginEditor(pluginCode) {
-  const form = pluginForms.find((candidate) => candidate.code === pluginCode);
-  if (!form) return;
-  activePluginCode = pluginCode;
+async function openPluginEditor(pluginCode, button) {
+  const sequence = ++pluginEditorSequence;
+  if (button) button.disabled = true;
+  showNotice('正在读取插件配置…');
+  try {
+    const { form } = await request(`/admin/api/plugins?plugin_code=${encodeURIComponent(pluginCode)}`);
+    if (sequence !== pluginEditorSequence) return;
+    if (!form) throw new Error('插件配置不存在');
+    pluginForms = [...pluginForms.filter((candidate) => candidate.code !== pluginCode), form];
+    renderPluginEditor(form);
+    showNotice('插件配置已载入');
+  } catch (error) {
+    if (sequence === pluginEditorSequence && error.message !== 'unauthorized') showNotice(error.message, 'error');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function renderPluginEditor(form) {
+  activePluginCode = form.code;
   document.querySelector('#plugin-editor-title').textContent = `编辑 ${form.name}`;
   // 副本可以改个一眼认得出是哪个账号的名字；基础插件的名字跟着构建走，不给改。
   const instanceNameField = Number(form.instance_sequence ?? 1) > 1
@@ -1216,6 +1244,7 @@ function openPluginEditor(pluginCode) {
 }
 
 function closePluginEditor() {
+  pluginEditorSequence += 1;
   receiptDiscoverySequence += 1;
   pluginEditor.hidden = true;
   activePluginCode = '';
@@ -1246,7 +1275,7 @@ async function savePlugin(event) {
     pluginForms = pluginForms.map((candidate) => candidate.code === activePluginCode ? response.form : candidate);
     showNotice(`${response.form.name} 配置已保存`);
     await load({ keepEditor: true });
-    openPluginEditor(activePluginCode);
+    renderPluginEditor(response.form);
   } catch (error) {
     showNotice(error.message, 'error');
   } finally {
@@ -1487,8 +1516,8 @@ async function load({ keepEditor = false } = {}) {
       const site = await request('/admin/api/site');
       renderSiteConfig(site.config, site.contact_url, site.poll_trigger_url);
     } else if (activeAdminSection === 'plugins') {
-      const plugins = await request('/admin/api/plugins');
-      pluginForms = plugins.forms;
+      const plugins = await request('/admin/api/plugins?view=summary');
+      if (!keepEditor) pluginForms = [];
       pluginsState = plugins.results;
       renderPlugins(plugins.results);
       renderLicenseProblem(plugins.license ?? {});
@@ -1528,7 +1557,7 @@ async function load({ keepEditor = false } = {}) {
 pluginBody.addEventListener('click', (event) => {
   const edit = event.target.closest('[data-edit-plugin]');
   if (edit) {
-    openPluginEditor(edit.dataset.editPlugin);
+    openPluginEditor(edit.dataset.editPlugin, edit);
     return;
   }
   const duplicate = event.target.closest('[data-duplicate-plugin]');

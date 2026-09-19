@@ -91,3 +91,47 @@ test('内嵌静态资源保持 GET/HEAD/404 边界', async () => {
   assert.equal((await fetchBundledAsset(new Request('https://pay.example/missing'))).status, 404);
   assert.equal((await fetchBundledAsset(new Request('https://pay.example/index.html', { method: 'POST' }))).status, 405);
 });
+
+test('带 ETag 复验返回 304 空体，指纹 URL 给 immutable 长缓存', async () => {
+  // 以前这里设了 ETag 却从不读 if-none-match：浏览器缓存过期后带着 ETag 回来复验，
+  // 被原样回了整整一份。收银台 cashier.js 有 200 KB 级别，等于每个付款人每小时
+  // 重下一次。指纹 URL 同理——内容哈希变了 URL 就变，本来就不该只缓存一小时。
+  const path = '/cashier/assets/cashier.js';
+  const plain = await fetchBundledAsset(new Request(`https://pay.example${path}`));
+  assert.equal(plain.status, 200);
+  const etag = plain.headers.get('etag');
+  assert.match(etag, /^"[0-9a-f]{64}"$/u);
+  assert.equal(plain.headers.get('cache-control'), 'public, max-age=3600');
+
+  // 指纹对得上才给一年——手敲的 ?v= 骗不到长缓存。
+  const fingerprint = etag.replaceAll('"', '').slice(0, 12);
+  const versioned = await fetchBundledAsset(new Request(`https://pay.example${path}?v=${fingerprint}`));
+  assert.equal(versioned.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+  const bogus = await fetchBundledAsset(new Request(`https://pay.example${path}?v=deadbeefcafe`));
+  assert.equal(bogus.headers.get('cache-control'), 'public, max-age=3600');
+
+  // 复验命中：304 且不带 body。
+  const revalidated = await fetchBundledAsset(
+    new Request(`https://pay.example${path}`, { headers: { 'if-none-match': etag } }),
+  );
+  assert.equal(revalidated.status, 304);
+  assert.equal((await revalidated.text()).length, 0);
+  assert.equal(revalidated.headers.get('etag'), etag);
+
+  // Cloudflare 压缩后会把 ETag 弱化成 W/"..." 再发给浏览器，浏览器原样带回来。
+  // 不剥掉 W/ 前缀的话线上永远匹配不上，304 等于白写。
+  const weak = await fetchBundledAsset(
+    new Request(`https://pay.example${path}`, { headers: { 'if-none-match': `W/${etag}` } }),
+  );
+  assert.equal(weak.status, 304);
+
+  // 内容真的变了就必须回全量。
+  const stale = await fetchBundledAsset(
+    new Request(`https://pay.example${path}`, { headers: { 'if-none-match': '"0000"' } }),
+  );
+  assert.equal(stale.status, 200);
+
+  // HTML 是指纹的来源，必须每次都拿最新的。
+  const html = await fetchBundledAsset(new Request('https://pay.example/cashier/index.html'));
+  assert.equal(html.headers.get('cache-control'), 'no-store');
+});
