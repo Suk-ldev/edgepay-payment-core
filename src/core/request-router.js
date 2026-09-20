@@ -49,7 +49,9 @@ import {
   receiptDiscoveryAccount, receiptDiscoveryAvailable, sanitizeReceiptDiscoveryRecords,
 } from '../receipt-discovery.js';
 import { fetchBundledAsset } from '../bundled-assets.js';
-import { compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease } from '../release.js';
+import {
+  compareReleaseVersions, CURRENT_RELEASE_VERSION, fetchLatestRelease, VERSION_RE,
+} from '../release.js';
 import {
   PRESENCE_PREFIX, PRESENCE_SWEEP_MS, PRESENCE_TTL_MS,
   clearWatcherPresence, liveWatcherCoverage, onlineWatcherPlugins, presenceKey, recordWatcherPresence,
@@ -3653,8 +3655,22 @@ async function cachedLatestRelease(env) {
   }
 }
 
+/**
+ * 当前跑的是哪个发行版本。
+ *
+ * 以商业构建注入的 buildInfo.release 为准：它由 generate-build-info.mjs 每次发行现写，
+ * 跟着发行走。release.js 里那个常量是公开核心单独运行时的兜底——它一度停在 1.2.1，
+ * 而实际发行早已是 2.1.x，于是后台「当前版本」长期显示一个错的号，
+ * update_available 也就永远算成"有新版"。
+ */
+function currentReleaseVersion(env) {
+  const release = String(runtimeOf(env).buildInfo?.release ?? '').trim();
+  return VERSION_RE.test(release) && !release.startsWith('0.0.0') ? release : CURRENT_RELEASE_VERSION;
+}
+
 async function adminVersionApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
+  const currentVersion = currentReleaseVersion(env);
   try {
     const latest = await cachedLatestRelease(env);
     const deployUrl = new URL('https://deploy.imsuk.cn/');
@@ -3665,13 +3681,13 @@ async function adminVersionApi(request, env) {
     }
     return jsonResponse({
       ok: true,
-      current_version: CURRENT_RELEASE_VERSION,
+      current_version: currentVersion,
       latest_version: latest.version,
-      update_available: compareReleaseVersions(latest.version, CURRENT_RELEASE_VERSION) > 0,
+      update_available: compareReleaseVersions(latest.version, currentVersion) > 0,
       deploy_url: deployUrl.toString(),
     });
   } catch {
-    return jsonResponse({ ok: false, current_version: CURRENT_RELEASE_VERSION, update_available: false });
+    return jsonResponse({ ok: false, current_version: currentVersion, update_available: false });
   }
 }
 
