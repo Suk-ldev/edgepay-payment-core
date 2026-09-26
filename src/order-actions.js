@@ -252,6 +252,17 @@ export function resolveOrderActions(order, env = {}) {
   ];
 }
 
+// 订单最近一条收款事件（e）。按回调状态筛选看的就是它，所以筛选计数也要带上。
+const LATEST_EVENT_JOIN = `
+  LEFT JOIN receipt_events e ON e.id = (
+    SELECT latest_event.id
+    FROM receipt_events latest_event
+    WHERE latest_event.payment_no = p.payment_no
+    ORDER BY latest_event.id DESC
+    LIMIT 1
+  )
+`;
+
 const ORDER_SELECT = `
   SELECT
     p.*,
@@ -261,7 +272,9 @@ const ORDER_SELECT = `
     COALESCE(c.unfreeze_reason, '') AS unfreeze_reason,
     c.unfrozen_at,
     COALESCE(r.reserved_refund_fen, 0) AS reserved_refund_fen,
-    MAX(0, p.expected_amount_fen - COALESCE(r.reserved_refund_fen, 0)) AS refundable_amount_fen,
+    -- 不用 SQLite 的双参数 MAX()：PostgreSQL 没有这个写法，CASE 两边都能跑。
+    CASE WHEN p.expected_amount_fen > COALESCE(r.reserved_refund_fen, 0)
+      THEN p.expected_amount_fen - COALESCE(r.reserved_refund_fen, 0) ELSE 0 END AS refundable_amount_fen,
     n.status AS notify_status,
     n.attempts AS notify_attempts,
     n.last_error AS notify_last_error,
@@ -297,13 +310,7 @@ const ORDER_SELECT = `
     FROM receipt_events
     GROUP BY payment_no
   ) es ON es.payment_no = p.payment_no
-  LEFT JOIN receipt_events e ON e.id = (
-    SELECT latest_event.id
-    FROM receipt_events latest_event
-    WHERE latest_event.payment_no = p.payment_no
-    ORDER BY latest_event.id DESC
-    LIMIT 1
-  )
+  ${LATEST_EVENT_JOIN}
 `;
 
 async function loadOrder(env, paymentNo) {
@@ -426,18 +433,17 @@ function adminOrderWhere(filters) {
     clauses.push('p.status = ?');
     bindings.push(filters.status);
   }
+  const latestEventState = { FAILED: 'REJECTED', PROCESSING: 'RECEIVED', SUCCESS: 'PROCESSED' }[filters.callback_status];
   if (filters.callback_status === 'NONE') {
     clauses.push('COALESCE(es.callback_times, 0) = 0');
-  } else if (filters.callback_status === 'FAILED') {
-    clauses.push("e.state = 'REJECTED'");
-  } else if (filters.callback_status === 'PROCESSING') {
-    clauses.push("e.state = 'RECEIVED'");
-  } else if (filters.callback_status === 'SUCCESS') {
-    clauses.push("e.state = 'PROCESSED'");
+  } else if (latestEventState) {
+    clauses.push(`e.state = '${latestEventState}'`);
   }
   return {
     sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '',
     bindings,
+    // 只有按最近一条事件筛选时计数才需要那个逐行子查询。
+    latestEvent: Boolean(latestEventState),
   };
 }
 
@@ -448,6 +454,7 @@ export async function listAdminOrders(env, input = {}) {
     SELECT COUNT(*) AS total
     FROM payment_attempts p
     ${EVENT_STATS_JOIN}
+    ${where.latestEvent ? LATEST_EVENT_JOIN : ''}
     ${where.sql}
   `);
   const count = await (where.bindings.length

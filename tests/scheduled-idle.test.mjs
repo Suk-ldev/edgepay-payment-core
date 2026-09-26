@@ -112,3 +112,42 @@ test('计数查询同时问出待办和掉线，空跑不额外加查询', async
   assert.match(db.sql[0], /silent_watchers/u);
   assert.match(db.sql[0], /watcher_failovers/u);
 });
+
+test('外部 tick 地址做和 cron 同样的一轮，并用轮询 Token 鉴权', async () => {
+  const tickEnv = (db) => ({ ...env(db), POLL_TRIGGER_TOKEN: 'poll-token' });
+  const tick = (db, token) => worker.fetch(
+    new Request(`https://pay.example/internal/tick${token ? `?token=${token}` : ''}`),
+    tickEnv(db),
+    { waitUntil() {} },
+  );
+
+  const rejected = countingDb({ open_payments: 0, grace_payments: 0, due_notifications: 1 });
+  assert.equal((await tick(rejected, 'wrong')).status, 401);
+  assert.ok(!rejected.sql.some((sql) => /notification_tasks/u.test(sql)), '鉴权失败不该碰待办');
+
+  const idle = countingDb({
+    open_payments: 0, grace_payments: 0, due_notifications: 0, silent_watchers: 0, watcher_failovers: 0,
+  });
+  const idleResponse = await tick(idle, 'poll-token');
+  assert.equal(idleResponse.status, 200);
+  assert.deepEqual(await idleResponse.json(), { ok: true, payment_work: false, watcher_work: false });
+
+  const busy = countingDb({ open_payments: 0, grace_payments: 0, due_notifications: 1 });
+  const busyResponse = await tick(busy, 'poll-token');
+  assert.equal(busyResponse.status, 200);
+  assert.equal((await busyResponse.json()).payment_work, true);
+  assert.ok(
+    busy.sql.some((sql) => /FROM notification_tasks WHERE status IN/u.test(sql)),
+    '有到点的通知时 tick 必须重投，这正是 /internal/receipt-poll 做不到的',
+  );
+});
+
+test('外部 tick 只接受 GET', async () => {
+  const db = countingDb({ open_payments: 1 });
+  const response = await worker.fetch(
+    new Request('https://pay.example/internal/tick?token=poll-token', { method: 'POST' }),
+    { ...env(db), POLL_TRIGGER_TOKEN: 'poll-token' },
+    { waitUntil() {} },
+  );
+  assert.equal(response.status, 405);
+});

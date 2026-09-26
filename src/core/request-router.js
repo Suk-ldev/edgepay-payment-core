@@ -13,7 +13,7 @@ import { adminCaptchaResponse, clearAdminSession, createAdminSession, isAdminSes
 import {
   EPAY_PAYLOAD_MAX_BYTES, PROVIDER_CALLBACK_MAX_BYTES, readBoundedJson, readBoundedText,
 } from '../body-limits.js';
-import { dispatchDueNotifications, enqueuePaymentNotification } from '../notifications.js';
+import { dispatchDueNotifications, enqueuePaymentNotification, staleSendingBefore } from '../notifications.js';
 import { jsonResponse } from '../security.js';
 import {
   appendQuery, fenToMoney, isHttpsUrl, moneyToFen, optionalText,
@@ -3722,6 +3722,7 @@ async function route(request, env, ctx) {
   if (pathname === '/api/watcher/bootstrap' && request.method === 'POST') return watcherBootstrap(request, env);
   if (pathname === '/api/watcher/alert' && request.method === 'POST') return watcherAlertApi(request, env);
   if (pathname === '/internal/receipt-poll') return receiptPollTrigger(request, env, ctx);
+  if (pathname === '/internal/tick') return scheduledTickTrigger(request, env, ctx);
   if (pathname === '/api/pay/' || pathname === '/api/pay') return new Response('not_found', { status: 404 });
   if ((pathname === '/api' || pathname === '/api.php')) return epayApi(request, env);
   const channelMatch = pathname.match(/^\/api\/pay\/(\d+)\/notify$/u);
@@ -3830,7 +3831,8 @@ async function scheduledWork(env, registry, now = Date.now()) {
       (SELECT COUNT(*) FROM payment_attempts
         WHERE plugin_code = 'usdt_trc20_receipt' AND status = 'EXPIRED' AND expires_at > ?) AS grace_payments,
       (SELECT COUNT(*) FROM notification_tasks
-        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?) AS due_notifications,
+        WHERE (status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?)
+          OR (status = 'SENDING' AND updated_at < ?)) AS due_notifications,
       (SELECT COUNT(*) FROM runtime_settings
         WHERE (setting_key = 'watcher_presence' OR setting_key LIKE ?)
           AND updated_at < ? AND updated_at > ?) AS silent_watchers,
@@ -3839,6 +3841,7 @@ async function scheduledWork(env, registry, now = Date.now()) {
   `).bind(
     graceCutoff,
     timestamp(),
+    staleSendingBefore(now),
     `${PRESENCE_PREFIX}%`,
     offlineBefore,
     forgetBefore,
@@ -3851,6 +3854,41 @@ async function scheduledWork(env, registry, now = Date.now()) {
     hasWatcherWork: Number(row?.silent_watchers ?? 0)
       + Number(row?.watcher_failovers ?? 0) > 0,
   };
+}
+
+/** 一轮定时任务的正事。`env` 必须已经挂好运行时和密钥。 */
+async function runScheduledWork(env, ctx, work, trigger) {
+  // 掉线巡检不该拖垮这一轮的正事，失败只记日志。
+  if (work.hasWatcherWork) {
+    await checkWatcherLiveness(env).catch((error) => {
+      console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
+    });
+  }
+  if (!work.hasPaymentWork) return;
+  await Promise.all([expireDuePayments(env), dispatchDueNotifications(env)]);
+  await runReceiptPoll(env, ctx, trigger, true);
+}
+
+/**
+ * 外部计划任务入口：和 Cron 做完全一样的一轮（过期、通知重投、掉线巡检、收款轮询）。
+ *
+ * 给没有分钟级 Cron 的平台（EdgeOne Makers）用，Cloudflare 上没开 Cron 时也能用。
+ * `/internal/receipt-poll` 只跑收款轮询，通知重投和掉线巡检都靠 Cron，所以不能拿它代替。
+ * 鉴权沿用收款轮询的 Token，在密钥管理里轮换后旧 Token 仍有兼容期。
+ */
+async function scheduledTickTrigger(request, env, ctx) {
+  if (request.method !== 'GET') return new Response('method_not_allowed', { status: 405 });
+  const authorized = [env.POLL_TRIGGER_TOKEN, env.POLL_PREVIOUS_TRIGGER_TOKEN]
+    .filter(Boolean)
+    .some((secret) => verifyStaticPollToken(request, secret));
+  if (!authorized) return unauthorized();
+  const work = await scheduledWork(env, runtimeOf(env).registry);
+  await runScheduledWork(env, ctx, work, 'external_tick');
+  return jsonResponse(
+    { ok: true, payment_work: work.hasPaymentWork, watcher_work: work.hasWatcherWork },
+    200,
+    { 'cache-control': 'no-store' },
+  );
 }
 
 export function createHandlers(runtime) {
@@ -3869,16 +3907,7 @@ export function createHandlers(runtime) {
         // 后面那一整套（密钥解密、通道与插件配置、授权状态、两遍订单扫描）全省掉。
         const work = await scheduledWork(env, runtime.registry);
         if (!work.hasPaymentWork && !work.hasWatcherWork) return;
-        const runtimeEnv = await prepare(env);
-        // 掉线巡检不该拖垮这一轮的正事，失败只记日志。
-        if (work.hasWatcherWork) {
-          await checkWatcherLiveness(runtimeEnv).catch((error) => {
-            console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
-          });
-        }
-        if (!work.hasPaymentWork) return;
-        await Promise.all([expireDuePayments(runtimeEnv), dispatchDueNotifications(runtimeEnv)]);
-        await runReceiptPoll(runtimeEnv, ctx, 'scheduled', true);
+        await runScheduledWork(await prepare(env), ctx, work, 'scheduled');
       })());
     },
   };

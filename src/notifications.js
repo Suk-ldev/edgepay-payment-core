@@ -3,6 +3,16 @@ import { safeWebhookUrl } from './security.js';
 
 const now = () => new Date().toISOString();
 
+// 通知认领成 SENDING 之后，如果执行被平台掐断（后台任务超时、云函数实例被回收），
+// 这一行就永远停在 SENDING，商户再也收不到通知。超过这个时长还没收尾的一律视为中断。
+const STALE_SENDING_MS = 5 * 60_000;
+const NOTIFY_TIMEOUT_MS = 10_000;
+
+/** 早于这个时间还停在 SENDING 的通知任务算中断。scheduledWork 的计数条件要和这里一致。 */
+export function staleSendingBefore(nowMs = Date.now()) {
+  return new Date(nowMs - STALE_SENDING_MS).toISOString();
+}
+
 function retryAt(attempts) {
   const seconds = Math.min(60 * 60, 30 * (2 ** Math.max(0, attempts - 1)));
   return new Date(Date.now() + seconds * 1000).toISOString();
@@ -88,6 +98,8 @@ export async function dispatchNotificationTask(env, task) {
     const response = await fetch(notifyUrl, {
       method: 'GET',
       headers: { 'user-agent': 'Payment-Notify/1.0' },
+      // 不设超时的话，商户接口挂住会把这次执行拖到被平台掐断，任务停在 SENDING。
+      signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
     });
     const responseText = (await response.text()).trim();
     if (!response.ok || responseText.toLowerCase() !== 'success') {
@@ -115,6 +127,14 @@ export async function dispatchNotificationTask(env, task) {
 }
 
 export async function dispatchDueNotifications(env, limit = 25, paymentNo = null) {
+  // 只在定时轮次里回收，支付回调里单发那一条不多花这次写。attempts 在认领时已经加过，
+  // 放回 RETRY 后照常按次数上限处理。
+  if (!paymentNo) {
+    await env.DB.prepare(`
+      UPDATE notification_tasks SET status = 'RETRY', last_error = ?, updated_at = ?
+      WHERE status = 'SENDING' AND updated_at < ?
+    `).bind('上次投递没有收尾（执行被中断），重新排队', now(), staleSendingBefore()).run();
+  }
   const statement = paymentNo
     ? env.DB.prepare(`SELECT * FROM notification_tasks WHERE payment_no = ? AND status IN ('PENDING', 'RETRY') AND next_attempt_at <= ? LIMIT ?`).bind(paymentNo, now(), limit)
     : env.DB.prepare(`SELECT * FROM notification_tasks WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?`).bind(now(), limit);
