@@ -43,6 +43,33 @@ test('版本检查认部署站返回的发行类型', async () => {
   });
   assert.equal(manifest.version, '2.1.12');
   assert.deepEqual(urls.map((item) => item.url), ['https://deploy.imsuk.cn/api/latest-version']);
+  assert.equal(urls[0].options.cache, 'no-store');
+  assert.ok(urls[0].options.signal instanceof AbortSignal, '每个地址都要有超时');
+});
+
+test('部署站主地址被同 zone 拦截（1042）时退到 Custom Domain 备用地址', async () => {
+  // 支付站和部署站在同一个 zone 时，Worker fetch 走路由的部署站会被 Cloudflare 拦下，
+  // 维护者自己的站因此从来没检查成功过；只有 Custom Domain 上的 Worker 允许同 zone 调用。
+  const urls = [];
+  const manifest = await fetchLatestRelease(async (url) => {
+    urls.push(url);
+    if (url.startsWith('https://deploy.imsuk.cn/')) return new Response('error code: 1042', { status: 404 });
+    return Response.json({ edition: 'commercial-entitlement-build', version: '2.1.15' });
+  });
+  assert.equal(manifest.version, '2.1.15');
+  assert.deepEqual(urls, [
+    'https://deploy.imsuk.cn/api/latest-version',
+    'https://deploy-api.imsuk.eu.org/api/latest-version',
+  ]);
+});
+
+test('两个地址都失败时，错误里带上各自的原因', async () => {
+  await assert.rejects(
+    () => fetchLatestRelease(async (url) => (url.includes('deploy.imsuk.cn')
+      ? new Response('error code: 1042', { status: 404 })
+      : Promise.reject(new Error('connect timeout')))),
+    /Deploy HTTP 404（error code: 1042）；Deploy API connect timeout/u,
+  );
 });
 
 test('清单没带 edition 也认，版本号格式不对才拒', async () => {

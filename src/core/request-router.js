@@ -3627,13 +3627,15 @@ async function adminDashboard(request, env) {
 }
 
 const RELEASE_CHECK_KEY = 'release_check';
-const RELEASE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+// 原来是 6 小时：发了新版之后，商户在那之前打开过后台的话，要等大半天才会弹升级提示。
+// 只有打开后台时才查，10 分钟一次的量可以忽略。
+const RELEASE_CHECK_TTL_MS = 10 * 60 * 1000;
 
 /**
  * 带缓存的最新版本查询。
  *
  * 原来每打开一次后台都要现查一遍 GitHub（失败再退到部署站），两次外网请求串行，
- * 插件页要一直等着它转。发行版本一天也变不了几次，没必要每次都问。
+ * 插件页要一直等着它转。短时间内反复打开后台没必要每次都问。
  *
  * 查不到就继续用上一次的结果：一次网络抖动不该把升级提示弄没。
  */
@@ -3686,8 +3688,11 @@ async function adminVersionApi(request, env) {
       update_available: compareReleaseVersions(latest.version, currentVersion) > 0,
       deploy_url: deployUrl.toString(),
     });
-  } catch {
-    return jsonResponse({ ok: false, current_version: currentVersion, update_available: false });
+  } catch (error) {
+    // 原来这里静默吞掉，检查更新失败了好几个版本都没人知道。记日志，也回给后台。
+    const message = String(error?.message ?? error);
+    console.warn('release_check_failed', { message });
+    return jsonResponse({ ok: false, current_version: currentVersion, update_available: false, error: message });
   }
 }
 

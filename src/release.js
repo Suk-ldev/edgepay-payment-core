@@ -5,31 +5,30 @@
  * generate-build-info.mjs 每次发行现写，不会漂。这里只是兜底，
  * 发行时顺手跟上，别让它再退化成一个谁都不认识的数字。
  */
-export const CURRENT_RELEASE_VERSION = '2.1.14';
+export const CURRENT_RELEASE_VERSION = '2.1.15';
 
 export const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 
 /**
  * 最新发行版本的来源：部署站。
  *
- * 这里原来还排在前面一个 GitHub 源
- * （api.github.com/repos/Suk-ldev/edgepay-serverless-payment/contents/COMMERCIAL_BUILD.json）——
- * 那个仓库不存在（带 token 查也是 404），Worker 又不带 GitHub 凭据，所以它永远 404；
- * 而且构建出来的 COMMERCIAL_BUILD.json 里根本没有 edition 字段，就算仓库在也会被
- * 下面的校验挡掉。加上部署站返回的 edition 是 commercial-entitlement-build、
- * 与原先写死要求的 public-commercial-encrypted 对不上，两个源全部失败，
- * 后台的"检查更新"从来没有真正成功过一次。
+ * 部署站本来就是发行的权威出口：wizard 钉住哪个版本，商户能升到的就是哪个版本。
+ * （这里原来还排着一个 GitHub 源，指向一个不存在的仓库，已删。）
  *
- * 部署站本来就是发行的权威出口：wizard 钉住哪个版本，商户能升到的就是哪个版本，
- * 所以直接认它，不再绕 GitHub。
+ * 为什么有两个地址：deploy.imsuk.cn 挂在 imsuk.eu.org 这个 zone 的 Worker 路由上。
+ * 支付站如果也在这个 zone（套件维护者自己的站就是），Worker 用 fetch 请求同 zone 上
+ * 另一个走路由的 Worker 会被 Cloudflare 直接拦掉（error 1042），检查更新就永远失败。
+ * 同 zone 的 fetch 只有打到 Custom Domain 上的 Worker 才放行，所以再配一个 Custom
+ * Domain 的备用地址（与 License 的 license-api 是同一个做法）。其它 zone 的商户第一个
+ * 地址就能成功，不会走到备用。
  */
 const SOURCES = Object.freeze([
-  {
-    name: 'Deploy',
-    url: 'https://deploy.imsuk.cn/api/latest-version',
-    options: { cache: 'no-store' },
-  },
+  { name: 'Deploy', url: 'https://deploy.imsuk.cn/api/latest-version' },
+  { name: 'Deploy API', url: 'https://deploy-api.imsuk.eu.org/api/latest-version' },
 ]);
+
+/** 单个地址的超时。版本检查在后台首屏之后才跑，但也不能让一个挂住的地址拖住整次请求。 */
+const SOURCE_TIMEOUT_MS = 5_000;
 
 /** 认得出的发行类型。字段缺失时不拦——清单本身没带 edition，版本号格式对就够了。 */
 const KNOWN_EDITIONS = Object.freeze([
@@ -59,15 +58,19 @@ export async function fetchLatestRelease(fetchImpl = fetch) {
   const failures = [];
   for (const source of SOURCES) {
     try {
-      const url = source.name === 'GitHub' ? `${source.url}&_=${Date.now()}` : source.url;
-      const response = await Reflect.apply(fetchImpl, globalThis, [url, source.options]);
+      const response = await Reflect.apply(fetchImpl, globalThis, [source.url, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS),
+      }]);
       if (!response.ok) {
-        failures.push(`${source.name} ${response.status}`);
+        // 1042 之类的拦截页正文里带错误码，截一小段进错误信息，下次一眼能看出是什么挡住了。
+        const detail = (await response.text().catch(() => '')).replace(/\s+/gu, ' ').trim().slice(0, 80);
+        failures.push(`${source.name} HTTP ${response.status}${detail ? `（${detail}）` : ''}`);
         continue;
       }
       return await parseManifest(response);
     } catch (error) {
-      failures.push(`${source.name} ${String(error)}`);
+      failures.push(`${source.name} ${String(error?.message ?? error)}`);
     }
   }
   throw new Error(`读取最新版本失败：${failures.join('；')}`);

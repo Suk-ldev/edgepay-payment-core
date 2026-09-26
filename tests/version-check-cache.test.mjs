@@ -146,3 +146,38 @@ test('没有登录态时不做任何版本查询', async () => {
     globalThis.fetch = original;
   }
 });
+
+test('缓存只保留十几分钟：发版半小时后打开后台就该看到新版本', async () => {
+  const settings = new Map([['release_check', JSON.stringify({
+    version: '2.1.13',
+    checked_at: new Date(Date.now() - (30 * 60 * 1000)).toISOString(),
+  })]]);
+  const env = fixture(settings);
+  const { state, impl } = countingFetch('2.1.14');
+  const original = globalThis.fetch;
+  globalThis.fetch = impl;
+  try {
+    assert.equal((await callVersionApi(env)).latest_version, '2.1.14');
+    assert.equal(state.calls, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('从没查成功过时把失败原因回给后台并记日志，不再静默吞掉', async () => {
+  const { impl } = countingFetch('', { fail: true });
+  const original = { fetch: globalThis.fetch, warn: console.warn };
+  const warnings = [];
+  globalThis.fetch = impl;
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const payload = await callVersionApi(fixture(new Map()));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.update_available, false);
+    assert.match(payload.error, /读取最新版本失败：Deploy 网络不可达；Deploy API 网络不可达/u);
+    assert.equal(warnings[0]?.[0], 'release_check_failed');
+  } finally {
+    globalThis.fetch = original.fetch;
+    console.warn = original.warn;
+  }
+});

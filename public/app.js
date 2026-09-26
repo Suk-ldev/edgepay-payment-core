@@ -204,14 +204,19 @@ async function request(path, options = {}) {
 }
 
 const VERSION_UPDATE_SNOOZE_COOKIE = 'edgepay_version_update_snoozed';
+let offeredVersion = '';
 
-function versionUpdateSnoozed() {
-  return document.cookie.split('; ').includes(`${VERSION_UPDATE_SNOOZE_COOKIE}=1`);
+/** 本次会话里点过"暂不升级"的那个版本；再出更新的版本照样弹。 */
+function snoozedVersion() {
+  const prefix = `${VERSION_UPDATE_SNOOZE_COOKIE}=`;
+  const item = document.cookie.split('; ').find((part) => part.startsWith(prefix));
+  return item ? decodeURIComponent(item.slice(prefix.length)) : '';
 }
 
 function snoozeVersionUpdate() {
-  // 会话级 Cookie：不设 Max-Age/Expires，浏览器关闭即失效，本次会话内不再弹升级提醒。
-  document.cookie = `${VERSION_UPDATE_SNOOZE_COOKIE}=1; path=/; SameSite=Lax`;
+  if (!offeredVersion) return;
+  // 会话级 Cookie：不设 Max-Age/Expires，浏览器关闭即失效。只记住这一个版本。
+  document.cookie = `${VERSION_UPDATE_SNOOZE_COOKIE}=${encodeURIComponent(offeredVersion)}; path=/; SameSite=Lax`;
 }
 
 function dismissVersionUpdate() {
@@ -220,10 +225,14 @@ function dismissVersionUpdate() {
 }
 
 async function checkVersionUpdate() {
-  if (versionUpdateSnoozed()) return;
   try {
     const payload = await request('/admin/api/version');
-    if (!payload.ok || !payload.update_available) return;
+    if (!payload.ok) {
+      console.warn('检查更新失败', payload.error ?? '');
+      return;
+    }
+    if (!payload.update_available || snoozedVersion() === payload.latest_version) return;
+    offeredVersion = payload.latest_version;
     document.querySelector('#version-update-message').textContent = `当前版本 ${payload.current_version}，最新版本 ${payload.latest_version}。`;
     document.querySelector('#version-update-confirm').onclick = () => location.assign(payload.deploy_url);
     versionUpdateDialog.showModal();
