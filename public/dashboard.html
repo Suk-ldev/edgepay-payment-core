@@ -345,7 +345,7 @@
             <footer><button type="button" data-rotate-key="watcher">轮换密钥</button><button type="button" data-revoke-key="watcher">撤销旧密钥</button></footer>
           </article>
           <article class="ui-key-card" data-key-card="poll">
-            <header><div><h3>轮询触发 Token</h3><p>用于外部计划任务调用 <code>/internal/receipt-poll</code>；轮换后要同步更新计划任务里的地址。</p></div><span class="ui-key-state">读取中</span></header>
+            <header><div><h3>轮询触发 Token</h3><p>用于外部计划任务访问的轮询触发地址（见“使用文档”）；轮换后要同步更新计划任务里的地址。</p></div><span class="ui-key-state">读取中</span></header>
             <dl><div><dt>指纹</dt><dd data-key-fingerprint>—</dd></div><div><dt>上次轮换</dt><dd data-key-rotated>—</dd></div><div><dt>旧 Token 有效至</dt><dd data-key-previous>无</dd></div></dl>
             <footer><button type="button" data-rotate-key="poll">轮换密钥</button><button type="button" data-revoke-key="poll">撤销旧密钥</button></footer>
           </article>
@@ -424,7 +424,8 @@
               <p><strong>统一优先级：</strong>Docker Watcher 在线且声明支持对应插件时，由 Docker 查询；容器离线超过两分钟后，具备 Worker 查询能力的插件自动接管。</p>
               <p><strong>Worker 后备：</strong>付呗、收钱吧、支付宝账单、海科码钱、天阙 Pretran、旺铺管家、USDT，以及已填写 Token/Cookie 的拉卡拉直连、星驿付直连和小Y经营。</p>
               <p><strong>只由 Docker 查询：</strong>富友、拉卡拉普通版、星驿付普通版、天阙会生活、易宝老板管账、易生收款啦和盛付通。盛付通使用官方页面的动态 SM2/SM4/SM3 加密请求，不在 Worker 中复刻。</p>
-              <p>外部排查时可访问 <code id="docs-receipt-poll">正在读取触发地址…</code> 手动跑一轮。返回值会列出待监听订单、发现流水、确认成功和错误明细；正常使用不要求另配这个计划任务。</p>
+              <p data-platform="cloudflare">外部排查时可访问 <code data-poll-trigger-url>正在读取触发地址…</code> 手动跑一轮。返回值会列出待监听订单、发现流水、确认成功和错误明细；正常使用不要求另配这个计划任务。</p>
+              <p data-platform="makers" hidden>外部排查时可访问 <code data-poll-trigger-url>正在读取触发地址…</code> 手动跑一轮。返回值里的 <code>receipt_poll</code> 会列出待监听订单、发现流水、确认成功和错误明细。</p>
               <button type="button" data-copy-doc="receipt-poll">复制手动排查地址</button>
             </div>
           </details>
@@ -440,11 +441,29 @@
               <p>查询最多展示近 5 分钟的 20 条成功流水，不会创建或确认 EdgePay 订单，也不返回付款人、备注、Cookie 或 Token。平台没有返回的编号会保持空白，不要用订单流水号代替。</p>
             </div>
           </details>
-          <details>
+          <details data-platform="makers" hidden open>
+            <summary>定时轮询：Makers 版必须配置</summary>
+            <div class="ui-doc-body">
+              <p>EdgeOne Makers 没有分钟级定时任务。订单过期、商户通知重投、监听端掉线巡检和收款轮询，都靠外部定时器访问下面这个地址来驱动；每访问一次，支付站就完整跑一轮，所以只需要配这一个地址。</p>
+              <p><code data-poll-trigger-url>正在读取触发地址…</code></p>
+              <ul>
+                <li><strong>建议每 7～15 秒访问一次。</strong>间隔越短到账确认越快，但函数调用次数也越多（10 秒一次约每月 26 万次）；超过 15 秒会明显拖慢确认和通知重投。</li>
+                <li>URL 已自带 <code>POLL_TRIGGER_TOKEN</code>，用任意能按秒级间隔发 GET 请求的定时器都可以（青龙、Uptime Kuma、自己服务器上的循环脚本等），不需要请求头或请求体。</li>
+                <li>没有待处理订单、到点通知和掉线监听时，这个地址只查一次数据库就返回，空跑成本很低。返回值里的 <code>receipt_poll</code> 是这一轮收款轮询的明细，排查时直接看它。</li>
+                <li>不配的话，只有收银台打开期间才会查询到账；订单不会自动过期，商户通知失败也不会重投。</li>
+                <li>该地址属于敏感凭据，不要放进公开日志或前端页面；泄露后到上方“密钥管理”轮换轮询 Token 即可。</li>
+              </ul>
+              <p>在自己的 Linux 服务器或 NAS 上，可以用下面这条 Docker 命令常驻运行（已填好你的地址，默认每 10 秒一次）：</p>
+              <pre><code data-poll-docker-command>正在读取触发地址…</code></pre>
+              <button type="button" data-copy-doc="poll-docker">复制 Docker 命令</button>
+              <button type="button" data-copy-doc="receipt-poll">复制定时轮询地址</button>
+            </div>
+          </details>
+          <details data-platform="cloudflare">
             <summary>Worker 主动查询：更快确认到账</summary>
             <div class="ui-doc-body">
               <p>收款确认有三种触发方式：① 收银台打开期间会按插件即时查询；② 部署向导里勾选了“启用每分钟后台轮询（Cron）”时，Worker 每分钟自动跑一轮；③ 用外部计划任务按固定间隔主动访问下面的触发地址（例如每 7 秒一次），Worker 收到后立即跑一轮。想比每分钟更快确认，或部署时没启用 Cron，就用第三种。</p>
-              <p><code id="docs-receipt-poll-active">正在读取触发地址…</code></p>
+              <p><code data-poll-trigger-url>正在读取触发地址…</code></p>
               <ul>
                 <li>URL 已自带 <code>POLL_TRIGGER_TOKEN</code>，直接填进任意 HTTP 计划任务（如青龙、cron、Uptime 监控、云函数定时器）即可，不需要请求头、请求体或 Node。</li>
                 <li>没有待支付订单时，这个接口不会请求任何收款平台或 TronGrid，空跑几乎没有成本；间隔越短确认越快，按需要设置即可。</li>

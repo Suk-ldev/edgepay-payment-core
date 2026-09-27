@@ -130,12 +130,17 @@ test('外部 tick 地址做和 cron 同样的一轮，并用轮询 Token 鉴权'
   });
   const idleResponse = await tick(idle, 'poll-token');
   assert.equal(idleResponse.status, 200);
-  assert.deepEqual(await idleResponse.json(), { ok: true, payment_work: false, watcher_work: false });
+  assert.deepEqual(await idleResponse.json(), {
+    ok: true, payment_work: false, watcher_work: false, receipt_poll: null,
+  });
 
   const busy = countingDb({ open_payments: 0, grace_payments: 0, due_notifications: 1 });
   const busyResponse = await tick(busy, 'poll-token');
   assert.equal(busyResponse.status, 200);
-  assert.equal((await busyResponse.json()).payment_work, true);
+  const busyResult = await busyResponse.json();
+  assert.equal(busyResult.payment_work, true);
+  // Makers 上只配 tick 一个地址，所以它要把这一轮收款轮询的结果一并带回，排查时不必再调 receipt-poll。
+  assert.equal(busyResult.receipt_poll?.trigger, 'external_tick');
   assert.ok(
     busy.sql.some((sql) => /FROM notification_tasks WHERE status IN/u.test(sql)),
     '有到点的通知时 tick 必须重投，这正是 /internal/receipt-poll 做不到的',

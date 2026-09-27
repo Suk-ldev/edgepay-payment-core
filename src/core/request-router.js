@@ -3334,13 +3334,24 @@ async function licenseStatusApi(request, env) {
   return jsonResponse(await runtime.license.state(env, runtime.registry));
 }
 
+/**
+ * 支付站跑在哪个平台上。Makers 版的平台层会写入 EDGEPAY_PLATFORM=makers；
+ * 其余一律按 Cloudflare 处理（原来的部署没有这个变量）。
+ */
+function deploymentPlatform(env) {
+  return env.EDGEPAY_PLATFORM === 'makers' ? 'makers' : 'cloudflare';
+}
+
 async function siteConfigApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   const publicBaseUrl = String(env.PUBLIC_BASE_URL ?? new URL(request.url).origin);
   const contactUrl = new URL('/contact', publicBaseUrl).toString();
+  const platform = deploymentPlatform(env);
+  // Makers 没有 Cron：给的是包含收款轮询在内的完整 tick 地址，用户只需要配这一个定时任务。
+  const pollTriggerPath = platform === 'makers' ? '/internal/tick' : '/internal/receipt-poll';
   const pollTriggerUrl = String(env.POLL_TRIGGER_TOKEN ?? '')
     ? (() => {
-        const url = new URL('/internal/receipt-poll', publicBaseUrl);
+        const url = new URL(pollTriggerPath, publicBaseUrl);
         url.searchParams.set('token', String(env.POLL_TRIGGER_TOKEN));
         return url.toString();
       })()
@@ -3350,6 +3361,7 @@ async function siteConfigApi(request, env) {
       config: await runtimeSiteConfig(env),
       contact_url: contactUrl,
       poll_trigger_url: pollTriggerUrl,
+      platform,
     });
   }
   if (request.method !== 'PUT') return new Response('method_not_allowed', { status: 405 });
@@ -3358,7 +3370,7 @@ async function siteConfigApi(request, env) {
     const body = await adminJsonBody(request);
     const config = normalizeSiteConfig(body);
     await writePlainJsonSetting(env, 'site_config', config);
-    return jsonResponse({ ok: true, config, contact_url: contactUrl, poll_trigger_url: pollTriggerUrl });
+    return jsonResponse({ ok: true, config, contact_url: contactUrl, poll_trigger_url: pollTriggerUrl, platform });
   } catch (error) {
     return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
@@ -3677,6 +3689,8 @@ async function adminVersionApi(request, env) {
     const latest = await cachedLatestRelease(env);
     const deployUrl = new URL('https://deploy.imsuk.cn/');
     deployUrl.searchParams.set('mode', 'upgrade');
+    // 部署站按这个参数直接进入对应平台的升级流程。
+    deployUrl.searchParams.set('platform', deploymentPlatform(env));
     deployUrl.searchParams.set('publicBaseUrl', new URL(request.url).origin);
     if (String(env.EDGEPAY_PROJECT_NAME ?? '').trim()) {
       deployUrl.searchParams.set('project', String(env.EDGEPAY_PROJECT_NAME).trim());
@@ -3828,13 +3842,21 @@ async function route(request, env, ctx) {
 async function scheduledWork(env, registry, now = Date.now()) {
   const maxGrace = Math.max(0, ...registry.manifests().map((manifest) => manifest.receiptGraceSeconds));
   const graceCutoff = new Date(now - (maxGrace * 1_000)).toISOString();
+  // 声明了确认宽限期的插件（链上转账要等区块确认）过期后仍要再查一会儿。按清单挑、
+  // 连同副本（`code~2`）一起算，和 receiptWatcherAccounts 的取数条件保持一致。
+  const graceCodes = registry.manifests()
+    .filter((manifest) => manifest.receiptGraceSeconds > 0)
+    .map((manifest) => manifest.code);
+  const graceClause = graceCodes.length
+    ? graceCodes.map(() => '(plugin_code = ? OR plugin_code LIKE ?)').join(' OR ')
+    : '0 = 1';
   const offlineBefore = new Date(now - PRESENCE_TTL_MS).toISOString();
   const forgetBefore = new Date(now - PRESENCE_SWEEP_MS).toISOString();
   const row = await env.DB.prepare(`
     SELECT
       (SELECT COUNT(*) FROM payment_attempts WHERE status IN ('PENDING', 'PAYING')) AS open_payments,
       (SELECT COUNT(*) FROM payment_attempts
-        WHERE plugin_code = 'usdt_trc20_receipt' AND status = 'EXPIRED' AND expires_at > ?) AS grace_payments,
+        WHERE (${graceClause}) AND status = 'EXPIRED' AND expires_at > ?) AS grace_payments,
       (SELECT COUNT(*) FROM notification_tasks
         WHERE (status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?)
           OR (status = 'SENDING' AND updated_at < ?)) AS due_notifications,
@@ -3844,6 +3866,7 @@ async function scheduledWork(env, registry, now = Date.now()) {
       (SELECT COUNT(*) FROM runtime_settings
         WHERE setting_key = ?) AS watcher_failovers
   `).bind(
+    ...graceCodes.flatMap((code) => [code, `${code}~%`]),
     graceCutoff,
     timestamp(),
     staleSendingBefore(now),
@@ -3861,7 +3884,10 @@ async function scheduledWork(env, registry, now = Date.now()) {
   };
 }
 
-/** 一轮定时任务的正事。`env` 必须已经挂好运行时和密钥。 */
+/**
+ * 一轮定时任务的正事。`env` 必须已经挂好运行时和密钥。
+ * 返回这一轮收款轮询的结果；没有待处理订单时不轮询，返回 null。
+ */
 async function runScheduledWork(env, ctx, work, trigger) {
   // 掉线巡检不该拖垮这一轮的正事，失败只记日志。
   if (work.hasWatcherWork) {
@@ -3869,16 +3895,17 @@ async function runScheduledWork(env, ctx, work, trigger) {
       console.warn('watcher_liveness_check_failed', { message: String(error?.message ?? error) });
     });
   }
-  if (!work.hasPaymentWork) return;
+  if (!work.hasPaymentWork) return null;
   await Promise.all([expireDuePayments(env), dispatchDueNotifications(env)]);
-  await runReceiptPoll(env, ctx, trigger, true);
+  return runReceiptPoll(env, ctx, trigger, true);
 }
 
 /**
  * 外部计划任务入口：和 Cron 做完全一样的一轮（过期、通知重投、掉线巡检、收款轮询）。
  *
  * 给没有分钟级 Cron 的平台（EdgeOne Makers）用，Cloudflare 上没开 Cron 时也能用。
- * `/internal/receipt-poll` 只跑收款轮询，通知重投和掉线巡检都靠 Cron，所以不能拿它代替。
+ * 它包含了 `/internal/receipt-poll` 的全部工作，并把这一轮的轮询结果原样带回，所以
+ * Makers 上只需要配这一个地址；反过来 receipt-poll 只跑收款轮询，代替不了它。
  * 鉴权沿用收款轮询的 Token，在密钥管理里轮换后旧 Token 仍有兼容期。
  */
 async function scheduledTickTrigger(request, env, ctx) {
@@ -3888,9 +3915,14 @@ async function scheduledTickTrigger(request, env, ctx) {
     .some((secret) => verifyStaticPollToken(request, secret));
   if (!authorized) return unauthorized();
   const work = await scheduledWork(env, runtimeOf(env).registry);
-  await runScheduledWork(env, ctx, work, 'external_tick');
+  const receiptPoll = await runScheduledWork(env, ctx, work, 'external_tick');
   return jsonResponse(
-    { ok: true, payment_work: work.hasPaymentWork, watcher_work: work.hasWatcherWork },
+    {
+      ok: true,
+      payment_work: work.hasPaymentWork,
+      watcher_work: work.hasWatcherWork,
+      receipt_poll: receiptPoll,
+    },
     200,
     { 'cache-control': 'no-store' },
   );

@@ -67,6 +67,12 @@ let activeOrderAction = null;
 let activeTestChannel = null;
 let contactUrl = `${location.origin}/contact`;
 let pollTriggerUrl = '';
+let deploymentPlatform = 'cloudflare';
+
+/** Makers 版的定时轮询命令：一个常驻容器按固定间隔访问 tick 地址。 */
+function pollDockerCommand(url) {
+  return `docker run -d --name edgepay-tick --restart unless-stopped alpine sh -c 'while true; do wget -q -T 30 -O /dev/null "${url}"; sleep 10; done'`;
+}
 let noticeTimer;
 const pluginQuery = { keyword: '', status: 'licensed' };
 const channelQuery = { keyword: '', status: '' };
@@ -370,9 +376,14 @@ function setImageUploadValue(container, value, previewFallback = '') {
   image.closest('.ui-image-preview').classList.toggle('empty', !image.src);
 }
 
-function renderSiteConfig(config, nextContactUrl = contactUrl, nextPollTriggerUrl = pollTriggerUrl) {
+function renderSiteConfig(config, nextContactUrl = contactUrl, nextPollTriggerUrl = pollTriggerUrl, nextPlatform = deploymentPlatform) {
   contactUrl = String(nextContactUrl || `${location.origin}/contact`);
   pollTriggerUrl = String(nextPollTriggerUrl || '');
+  deploymentPlatform = nextPlatform === 'makers' ? 'makers' : 'cloudflare';
+  // 文档里 Cloudflare 与 Makers 两套说明并存，只显示当前平台那一套。
+  document.querySelectorAll('[data-platform]').forEach((element) => {
+    element.hidden = element.dataset.platform !== deploymentPlatform;
+  });
   document.querySelector('#site-merchant-name').value = String(config?.merchant_name ?? 'EdgePay');
   document.querySelector('#site-order-expire-minutes').value = String(config?.order_expire_minutes ?? 5);
   document.querySelector('#site-cashier-footer-html').value = String(config?.cashier_footer_html ?? '');
@@ -384,9 +395,10 @@ function renderSiteConfig(config, nextContactUrl = contactUrl, nextPollTriggerUr
   document.querySelector('#docs-contact-url').textContent = contactUrl;
   document.querySelector('#docs-wechat-notify').textContent = `${location.origin}/api/pay/{通道ID}/notify`;
   const pollTriggerText = pollTriggerUrl || '尚未配置轮询触发 Token';
-  document.querySelector('#docs-receipt-poll').textContent = pollTriggerText;
-  const activePollUrl = document.querySelector('#docs-receipt-poll-active');
-  if (activePollUrl) activePollUrl.textContent = pollTriggerText;
+  document.querySelectorAll('[data-poll-trigger-url]').forEach((element) => { element.textContent = pollTriggerText; });
+  document.querySelectorAll('[data-poll-docker-command]').forEach((element) => {
+    element.textContent = pollTriggerUrl ? pollDockerCommand(pollTriggerUrl) : pollTriggerText;
+  });
   setImageUploadValue(
     siteForm.querySelector('[data-image-upload="contact_avatar_image"]'),
     config?.contact_avatar_image,
@@ -418,7 +430,7 @@ async function saveSiteConfig(event) {
         contact_qrcode_image: data.get('contact_qrcode_image'),
       }),
     });
-    renderSiteConfig(response.config, response.contact_url, response.poll_trigger_url);
+    renderSiteConfig(response.config, response.contact_url, response.poll_trigger_url, response.platform);
     showNotice('收银台设置已保存');
   } catch (error) {
     showNotice(error.message, 'error');
@@ -1523,7 +1535,7 @@ async function load({ keepEditor = false } = {}) {
       await loadSystemStatus();
     } else if (activeAdminSection === 'site' || activeAdminSection === 'docs') {
       const site = await request('/admin/api/site');
-      renderSiteConfig(site.config, site.contact_url, site.poll_trigger_url);
+      renderSiteConfig(site.config, site.contact_url, site.poll_trigger_url, site.platform);
     } else if (activeAdminSection === 'plugins') {
       const plugins = await request('/admin/api/plugins?view=summary');
       if (!keepEditor) pluginForms = [];
@@ -1644,7 +1656,11 @@ document.addEventListener('click', (event) => {
     return;
   }
   if (event.target.closest('[data-copy-doc="receipt-poll"]')) {
-    copyValue(pollTriggerUrl, 'Worker 监听触发地址已复制');
+    copyValue(pollTriggerUrl, deploymentPlatform === 'makers' ? '定时轮询地址已复制' : 'Worker 监听触发地址已复制');
+    return;
+  }
+  if (event.target.closest('[data-copy-doc="poll-docker"]')) {
+    copyValue(pollTriggerUrl ? pollDockerCommand(pollTriggerUrl) : '', 'Docker 命令已复制');
     return;
   }
   if (!orderFloatingMenu.contains(event.target) && !event.target.closest('[data-order-menu]')) closeOrderMenu();
