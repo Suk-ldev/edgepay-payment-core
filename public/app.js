@@ -67,6 +67,7 @@ let activeOrderAction = null;
 let activeTestChannel = null;
 let contactUrl = `${location.origin}/contact`;
 let pollTriggerUrl = '';
+let tickTriggerUrl = '';
 let deploymentPlatform = 'cloudflare';
 
 /** Makers 版的定时轮询命令：一个常驻容器按固定间隔访问 tick 地址。 */
@@ -132,6 +133,33 @@ const LISTENER_STATUS_META = Object.freeze({
   unknown: { label: '未上报', className: 'is-unknown' },
 });
 
+const YYB_LOGIN_STATE_LABELS = Object.freeze({
+  alive: '已登录',
+  unknown: '登录异常，正在重试续期',
+  scanning: '等待扫码',
+  expired: '登录已失效',
+  not_logged_in: '未登录',
+  offline: '协议服务未就绪',
+});
+
+/**
+ * 应用宝监听卡片里的微信登录信息。等扫码时直接把二维码摆在这里，不用再去翻容器日志；
+ * 「清除登录状态」用于换收款微信，或登录态坏了却没被自动识别出来的时候。
+ */
+function renderYybLogin(login) {
+  if (!login) return '';
+  const account = login.logged_in && login.nickname ? login.nickname : '—';
+  const qr = login.qr_url
+    ? `<div class="ui-yyb-qr">
+      <img src="${text(login.qr_url)}" alt="微信扫码登录二维码" width="160" height="160" referrerpolicy="no-referrer" />
+      <p>用<b>要收款的那个微信</b>扫码，并在手机上点确认。二维码过期会自动换新。<a href="${text(login.qr_url)}" target="_blank" rel="noopener noreferrer">新窗口打开</a></p>
+    </div>`
+    : '';
+  return `<dl class="ui-yyb-login"><div><dt>微信登录</dt><dd>${text(YYB_LOGIN_STATE_LABELS[login.state] ?? '未知')}</dd></div><div><dt>登录账号</dt><dd>${text(account)}</dd></div></dl>
+    ${qr}
+    <div class="ui-yyb-actions"><button class="ui-row-action ui-row-action-danger" type="button" data-yyb-logout${login.logout_pending ? ' disabled' : ''}>${login.logout_pending ? '等待监听端执行…' : '清除登录状态'}</button></div>`;
+}
+
 function renderSystemStatus(payload = {}) {
   const listeners = payload.listeners ?? {};
   const cards = [
@@ -152,6 +180,7 @@ function renderSystemStatus(payload = {}) {
     return `<article class="ui-system-status-card ${meta.className}">
       <header><div><span class="ui-status-dot" aria-hidden="true"></span><h3>${title}<small>${subtitle}</small></h3></div><strong>${meta.label}</strong></header>
       <dl><div><dt>在线实例</dt><dd>${online} / ${total}</dd></div><div><dt>监听范围</dt><dd>${text(scope)}</dd></div><div><dt>最近上报</dt><dd>${listener.last_seen_at ? dateTime(listener.last_seen_at) : '—'}</dd></div></dl>
+      ${key === 'yyb_bridge' ? renderYybLogin(payload.yyb_login) : ''}
     </article>`;
   }).join('');
   systemStatusChecked.textContent = `更新于 ${dateTime(payload.checked_at)}`;
@@ -376,9 +405,13 @@ function setImageUploadValue(container, value, previewFallback = '') {
   image.closest('.ui-image-preview').classList.toggle('empty', !image.src);
 }
 
-function renderSiteConfig(config, nextContactUrl = contactUrl, nextPollTriggerUrl = pollTriggerUrl, nextPlatform = deploymentPlatform) {
+function renderSiteConfig(
+  config, nextContactUrl = contactUrl, nextPollTriggerUrl = pollTriggerUrl, nextPlatform = deploymentPlatform,
+  nextTickTriggerUrl = tickTriggerUrl,
+) {
   contactUrl = String(nextContactUrl || `${location.origin}/contact`);
   pollTriggerUrl = String(nextPollTriggerUrl || '');
+  tickTriggerUrl = String(nextTickTriggerUrl || '');
   deploymentPlatform = nextPlatform === 'makers' ? 'makers' : 'cloudflare';
   // 文档里 Cloudflare 与 Makers 两套说明并存，只显示当前平台那一套。
   document.querySelectorAll('[data-platform]').forEach((element) => {
@@ -396,6 +429,9 @@ function renderSiteConfig(config, nextContactUrl = contactUrl, nextPollTriggerUr
   document.querySelector('#docs-wechat-notify').textContent = `${location.origin}/api/pay/{通道ID}/notify`;
   const pollTriggerText = pollTriggerUrl || '尚未配置轮询触发 Token';
   document.querySelectorAll('[data-poll-trigger-url]').forEach((element) => { element.textContent = pollTriggerText; });
+  document.querySelectorAll('[data-tick-trigger-url]').forEach((element) => {
+    element.textContent = tickTriggerUrl || '尚未配置轮询触发 Token';
+  });
   document.querySelectorAll('[data-poll-docker-command]').forEach((element) => {
     element.textContent = pollTriggerUrl ? pollDockerCommand(pollTriggerUrl) : pollTriggerText;
   });
@@ -430,7 +466,7 @@ async function saveSiteConfig(event) {
         contact_qrcode_image: data.get('contact_qrcode_image'),
       }),
     });
-    renderSiteConfig(response.config, response.contact_url, response.poll_trigger_url, response.platform);
+    renderSiteConfig(response.config, response.contact_url, response.poll_trigger_url, response.platform, response.tick_trigger_url);
     showNotice('收银台设置已保存');
   } catch (error) {
     showNotice(error.message, 'error');
@@ -1535,7 +1571,7 @@ async function load({ keepEditor = false } = {}) {
       await loadSystemStatus();
     } else if (activeAdminSection === 'site' || activeAdminSection === 'docs') {
       const site = await request('/admin/api/site');
-      renderSiteConfig(site.config, site.contact_url, site.poll_trigger_url, site.platform);
+      renderSiteConfig(site.config, site.contact_url, site.poll_trigger_url, site.platform, site.tick_trigger_url);
     } else if (activeAdminSection === 'plugins') {
       const plugins = await request('/admin/api/plugins?view=summary');
       if (!keepEditor) pluginForms = [];
@@ -1657,6 +1693,10 @@ document.addEventListener('click', (event) => {
   }
   if (event.target.closest('[data-copy-doc="receipt-poll"]')) {
     copyValue(pollTriggerUrl, deploymentPlatform === 'makers' ? '定时轮询地址已复制' : 'Worker 监听触发地址已复制');
+    return;
+  }
+  if (event.target.closest('[data-copy-doc="tick"]')) {
+    copyValue(tickTriggerUrl, '完整后台任务地址已复制');
     return;
   }
   if (event.target.closest('[data-copy-doc="poll-docker"]')) {
@@ -1967,6 +2007,23 @@ systemStatusClear?.addEventListener('click', async () => {
   } finally {
     systemStatusClear.disabled = false;
     systemStatusClear.textContent = '清除在线状态';
+  }
+});
+
+systemStatusGrid.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-yyb-logout]');
+  if (!button) return;
+  if (!confirm('清除应用宝监听的微信登录状态？\n\n清除后需要重新扫码登录；扫码前这条通道会在约 2 分钟后自动暂停，登录后自动恢复。')) return;
+  button.disabled = true;
+  button.textContent = '提交中…';
+  try {
+    renderSystemStatus(await request('/admin/api/system-status/yyb-logout', { method: 'POST', body: JSON.stringify({}) }));
+    showNotice('已提交，监听端下次上报时（约半分钟内）清除登录状态，新的二维码会显示在这里');
+  } catch (error) {
+    if (error.message === 'unauthorized') return;
+    showNotice(error.message, 'error');
+    button.disabled = false;
+    button.textContent = '清除登录状态';
   }
 });
 

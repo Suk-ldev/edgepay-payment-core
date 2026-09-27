@@ -471,6 +471,14 @@
                 <li>该地址属于敏感凭据，不要放进公开日志或前端页面；泄露后到上方“密钥管理”轮换轮询 Token 即可。</li>
               </ul>
               <button type="button" data-copy-doc="receipt-poll">复制主动查询地址</button>
+              <p><strong>可选：完整后台任务地址</strong></p>
+              <p><code data-tick-trigger-url>正在读取触发地址…</code></p>
+              <ul>
+                <li>访问一次等于手动跑一轮 Cron：订单过期、商户通知重投、监听端掉线巡检，再加一轮收款轮询；返回值里的 <code>receipt_poll</code> 是这一轮收款轮询的明细。</li>
+                <li>部署时启用了 Cron 就不需要它。没启用 Cron、又希望商户通知失败后能自动重投时，用它代替上面的主动查询地址，建议每 7～15 秒访问一次。</li>
+                <li>和主动查询地址用同一个轮询 Token，轮换后两个地址一起更新。</li>
+              </ul>
+              <button type="button" data-copy-doc="tick">复制完整后台任务地址</button>
             </div>
           </details>
           <details open>

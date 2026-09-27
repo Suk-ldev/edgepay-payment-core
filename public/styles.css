@@ -138,6 +138,12 @@ html [hidden] { display:none !important; }
 .ui-system-status-card dt { color:#8191a8; }
 .ui-system-status-card dd { min-width:0; margin:0; overflow:hidden; color:#304663; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
 .ui-system-status-card.is-loading { min-height:160px; opacity:.7; }
+.ui-system-status-card dl.ui-yyb-login { border-top:1px solid #edf2f8; }
+.ui-yyb-qr { display:flex; align-items:center; gap:14px; margin:0 20px; padding:14px; border:1px solid #cfe0f5; border-radius:6px; background:#f5f9ff; }
+.ui-yyb-qr img { flex:none; width:128px; height:128px; border:1px solid #dbe6f3; border-radius:4px; background:#fff; }
+.ui-yyb-qr p { margin:0; color:#304663; font-size:12px; line-height:1.7; }
+.ui-yyb-qr a { display:inline-block; margin-top:4px; color:#0756b8; font-weight:700; }
+.ui-yyb-actions { display:flex; justify-content:flex-end; padding:14px 20px 18px; }
 
 .ui-contact-settings { margin:4px 0 0; padding:20px; border:1px solid #dbe6f3; border-radius:6px; background:#f9fbfe; }
 .ui-contact-settings>legend { padding:0 8px; color:#102a4a; font-size:13px; font-weight:800; }

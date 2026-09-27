@@ -57,6 +57,9 @@ import {
   clearWatcherPresence, liveWatcherCoverage, onlineWatcherPlugins, presenceKey, recordWatcherPresence,
   staleWatcherInstances, watcherChannelPresence, watcherSystemStatus,
 } from '../watcher-presence.js';
+import {
+  claimYybLogout, recordYybLoginState, requestYybLogout, sanitizeYybLoginReport, yybLoginStatus,
+} from '../yyb-login.js';
 import { emitAlert, clearAlert, mergeAlertConfig, publicAlertConfig, readAlertConfig, writeAlertConfig, deliverAlert } from '../alerts.js';
 import { pluginContext } from './plugin-context.js';
 import { runtimeOf, withRuntime } from './runtime-env.js';
@@ -1699,6 +1702,32 @@ async function watcherAlertApi(request, env) {
     message: label ? `${label}\n${message}` : message,
   }, { secret: settingsEncryptionSecret(env) || String(env.EPAY_KEY ?? '') });
   return jsonResponse({ ok: true, event, ...result });
+}
+
+/**
+ * 应用宝监听上报微信登录状态，回包捎带后台点的「清除登录状态」。
+ *
+ * 和快照同一把 watcher 密钥签名，但不刷新 presence：掉登录的监听器照样要按掉线让
+ * 通道自动暂停，只是后台得知道它卡在哪一步、该扫哪张二维码。
+ */
+async function watcherYybLoginApi(request, env) {
+  const transportSecrets = [
+    env.WATCHER_TRANSPORT_SECRET ?? env.EPAY_KEY,
+    env.WATCHER_PREVIOUS_TRANSPORT_SECRET,
+  ].filter(Boolean).map(String);
+  let signed;
+  try {
+    signed = await readSignedWatcherPayload(request, transportSecrets);
+  } catch {
+    return unauthorized();
+  }
+  try {
+    await recordYybLoginState(env, sanitizeYybLoginReport(signed.payload));
+    const logout = await claimYybLogout(env);
+    return jsonResponse({ ok: true, ...(logout ? { logout } : {}) });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
+  }
 }
 
 /**
@@ -3348,19 +3377,21 @@ async function siteConfigApi(request, env) {
   const contactUrl = new URL('/contact', publicBaseUrl).toString();
   const platform = deploymentPlatform(env);
   // Makers 没有 Cron：给的是包含收款轮询在内的完整 tick 地址，用户只需要配这一个定时任务。
-  const pollTriggerPath = platform === 'makers' ? '/internal/tick' : '/internal/receipt-poll';
-  const pollTriggerUrl = String(env.POLL_TRIGGER_TOKEN ?? '')
-    ? (() => {
-        const url = new URL(pollTriggerPath, publicBaseUrl);
-        url.searchParams.set('token', String(env.POLL_TRIGGER_TOKEN));
-        return url.toString();
-      })()
-    : '';
+  const triggerUrl = (path) => {
+    if (!String(env.POLL_TRIGGER_TOKEN ?? '')) return '';
+    const url = new URL(path, publicBaseUrl);
+    url.searchParams.set('token', String(env.POLL_TRIGGER_TOKEN));
+    return url.toString();
+  };
+  const pollTriggerUrl = triggerUrl(platform === 'makers' ? '/internal/tick' : '/internal/receipt-poll');
+  // Cloudflare 上 tick 是可选项（Cron 已经做了同样的事），文档里单独列出来。
+  const tickTriggerUrl = triggerUrl('/internal/tick');
   if (request.method === 'GET') {
     return jsonResponse({
       config: await runtimeSiteConfig(env),
       contact_url: contactUrl,
       poll_trigger_url: pollTriggerUrl,
+      tick_trigger_url: tickTriggerUrl,
       platform,
     });
   }
@@ -3370,7 +3401,9 @@ async function siteConfigApi(request, env) {
     const body = await adminJsonBody(request);
     const config = normalizeSiteConfig(body);
     await writePlainJsonSetting(env, 'site_config', config);
-    return jsonResponse({ ok: true, config, contact_url: contactUrl, poll_trigger_url: pollTriggerUrl, platform });
+    return jsonResponse({
+      ok: true, config, contact_url: contactUrl, poll_trigger_url: pollTriggerUrl, tick_trigger_url: tickTriggerUrl, platform,
+    });
   } catch (error) {
     return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
@@ -3403,14 +3436,19 @@ async function keyManagementApi(request, env) {
   }
 }
 
+async function systemStatusPayload(env) {
+  const checkedAt = Date.now();
+  const [listeners, yybLogin] = await Promise.all([
+    watcherSystemStatus(env, checkedAt),
+    yybLoginStatus(env, checkedAt),
+  ]);
+  return { checked_at: new Date(checkedAt).toISOString(), listeners, yyb_login: yybLogin };
+}
+
 async function systemStatusApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method !== 'GET') return new Response('method_not_allowed', { status: 405 });
-  const checkedAt = Date.now();
-  return jsonResponse({
-    checked_at: new Date(checkedAt).toISOString(),
-    listeners: await watcherSystemStatus(env, checkedAt),
-  });
+  return jsonResponse(await systemStatusPayload(env));
 }
 
 async function clearSystemStatusApi(request, env) {
@@ -3419,13 +3457,21 @@ async function clearSystemStatusApi(request, env) {
   try {
     assertAdminMutationRequest(request);
     const cleared = await clearWatcherPresence(env);
-    const checkedAt = Date.now();
-    return jsonResponse({
-      ok: true,
-      cleared,
-      checked_at: new Date(checkedAt).toISOString(),
-      listeners: await watcherSystemStatus(env, checkedAt),
-    });
+    return jsonResponse({ ok: true, cleared, ...await systemStatusPayload(env) });
+  } catch (error) {
+    return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
+  }
+}
+
+/** 后台「清除登录状态」：Watcher 下次上报时取走指令，清掉微信登录态并重新出码。 */
+async function yybLogoutApi(request, env) {
+  if (!await isAdminSession(request, env)) return unauthorized();
+  if (request.method !== 'POST') return new Response('method_not_allowed', { status: 405 });
+  try {
+    assertAdminMutationRequest(request);
+    await adminJsonBody(request);
+    await requestYybLogout(env);
+    return jsonResponse({ ok: true, ...await systemStatusPayload(env) });
   } catch (error) {
     return jsonResponse({ ok: false, error: String(error.message ?? error) }, errorHttpStatus(error));
   }
@@ -3740,6 +3786,7 @@ async function route(request, env, ctx) {
   }
   if (pathname === '/api/watcher/bootstrap' && request.method === 'POST') return watcherBootstrap(request, env);
   if (pathname === '/api/watcher/alert' && request.method === 'POST') return watcherAlertApi(request, env);
+  if (pathname === '/api/watcher/yyb-login' && request.method === 'POST') return watcherYybLoginApi(request, env);
   if (pathname === '/internal/receipt-poll') return receiptPollTrigger(request, env, ctx);
   if (pathname === '/internal/tick') return scheduledTickTrigger(request, env, ctx);
   if (pathname === '/api/pay/' || pathname === '/api/pay') return new Response('not_found', { status: 404 });
@@ -3792,6 +3839,7 @@ async function route(request, env, ctx) {
   if (pathname === '/admin/api/keys' && ['GET', 'POST'].includes(request.method)) return keyManagementApi(request, env);
   if (pathname === '/admin/api/system-status' && request.method === 'GET') return systemStatusApi(request, env);
   if (pathname === '/admin/api/system-status/clear' && request.method === 'POST') return clearSystemStatusApi(request, env);
+  if (pathname === '/admin/api/system-status/yyb-logout' && request.method === 'POST') return yybLogoutApi(request, env);
   if (pathname === '/admin/api/channels' && ['GET', 'PUT'].includes(request.method)) return channelsApi(request, env);
   const adminChannelDeleteMatch = pathname.match(/^\/admin\/api\/channels\/(\d+)$/u);
   if (adminChannelDeleteMatch && request.method === 'DELETE') {
