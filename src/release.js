@@ -5,7 +5,7 @@
  * generate-build-info.mjs 每次发行现写，不会漂。这里只是兜底，
  * 发行时顺手跟上，别让它再退化成一个谁都不认识的数字。
  */
-export const CURRENT_RELEASE_VERSION = '2.1.15';
+export const CURRENT_RELEASE_VERSION = '2.1.16';
 
 export const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 
@@ -15,16 +15,15 @@ export const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
  * 部署站本来就是发行的权威出口：wizard 钉住哪个版本，商户能升到的就是哪个版本。
  * （这里原来还排着一个 GitHub 源，指向一个不存在的仓库，已删。）
  *
- * 为什么有两个地址：deploy.imsuk.cn 挂在 imsuk.eu.org 这个 zone 的 Worker 路由上。
- * 支付站如果也在这个 zone（套件维护者自己的站就是），Worker 用 fetch 请求同 zone 上
- * 另一个走路由的 Worker 会被 Cloudflare 直接拦掉（error 1042），检查更新就永远失败。
- * 同 zone 的 fetch 只有打到 Custom Domain 上的 Worker 才放行，所以再配一个 Custom
- * Domain 的备用地址（与 License 的 license-api 是同一个做法）。其它 zone 的商户第一个
- * 地址就能成功，不会走到备用。
+ * 为什么有两个地址、为什么 Custom Domain 排在前面：deploy.imsuk.cn 挂在 imsuk.eu.org
+ * 这个 zone 的 Worker 路由上。支付站如果也在这个 zone（套件维护者自己的站就是），Worker
+ * fetch 同 zone 上走路由的 Worker 会被送去 zone 源站，卡十几秒后 522，检查更新就永远失败。
+ * Custom Domain 上的 Worker 不受这个限制，从任何 zone 都能直接打到，所以先走它；
+ * deploy.imsuk.cn 留作备用。两个地址是同一个部署站 Worker。
  */
 const SOURCES = Object.freeze([
-  { name: 'Deploy', url: 'https://deploy.imsuk.cn/api/latest-version' },
   { name: 'Deploy API', url: 'https://deploy-api.imsuk.eu.org/api/latest-version' },
+  { name: 'Deploy', url: 'https://deploy.imsuk.cn/api/latest-version' },
 ]);
 
 /** 单个地址的超时。版本检查在后台首屏之后才跑，但也不能让一个挂住的地址拖住整次请求。 */

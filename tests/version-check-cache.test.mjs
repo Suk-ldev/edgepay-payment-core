@@ -174,7 +174,7 @@ test('从没查成功过时把失败原因回给后台并记日志，不再静�
     const payload = await callVersionApi(fixture(new Map()));
     assert.equal(payload.ok, false);
     assert.equal(payload.update_available, false);
-    assert.match(payload.error, /读取最新版本失败：Deploy 网络不可达；Deploy API 网络不可达/u);
+    assert.match(payload.error, /读取最新版本失败：Deploy API 网络不可达；Deploy 网络不可达/u);
     assert.equal(warnings[0]?.[0], 'release_check_failed');
   } finally {
     globalThis.fetch = original.fetch;
