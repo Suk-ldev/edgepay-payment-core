@@ -2557,24 +2557,25 @@ function cashierTypeName(code) {
   }[String(code)] ?? String(code);
 }
 
+/** 通道此刻能不能收款：通道开着、有权重、插件在本次构建里、已启用且配置齐全。收银台和首页共用。 */
+function channelReady(registry, pluginConfig, channel) {
+  return channel.enabled
+    && channel.weight > 0
+    && Boolean(registry.get(channel.plugin_code))
+    && pluginEnabled(registry, pluginConfig, channel.plugin_code)
+    && missingPluginFields(registry, pluginConfig, channel.plugin_code).length === 0;
+}
+
 async function availableCashierMethods(env, amountFen, requestedPayType = '') {
   const normalizedType = String(requestedPayType ?? '').trim().toLowerCase();
-  const channels = (await runtimeChannels(env)).filter((channel) => {
-    return channel.enabled
-      && channel.weight > 0
-      && (!normalizedType || channel.pay_types.includes(normalizedType));
-  });
-  const pluginConfig = await runtimePluginConfig(env);
+  const [channels, pluginConfig] = await Promise.all([runtimeChannels(env), runtimePluginConfig(env)]);
+  const { registry } = runtimeOf(env);
   const methods = [];
   const seen = new Set();
   for (const channel of channels) {
+    if (normalizedType && !channel.pay_types.includes(normalizedType)) continue;
+    if (!channelReady(registry, pluginConfig, channel)) continue;
     const config = configForPlugin(pluginConfig, channel.plugin_code);
-    const plugin = pluginOrNull(env, channel.plugin_code);
-    if (
-      !plugin
-      || !pluginEnabled(runtimeOf(env).registry, pluginConfig, channel.plugin_code)
-      || missingPluginFields(runtimeOf(env).registry, pluginConfig, channel.plugin_code).length
-    ) continue;
     if (minimumAmountFen(config) > amountFen) continue;
     if (channel.pay_types.includes('bank')) {
       methods.push({
@@ -3414,6 +3415,48 @@ async function contactConfigApi(env) {
   return jsonResponse({ config: contactPublicConfig(siteConfig) });
 }
 
+const HOME_PAY_TYPE_ORDER = Object.freeze(['alipay', 'wxpay', 'usdt', 'bank']);
+
+/**
+ * 首页展示的收款能力。
+ *
+ * 首页原来把"付呗 / Stripe / 微信 API"写死在 HTML 里，不管这台实例装了哪些插件，
+ * 访客看到的都是同一套。这里按收银台同一条规则（channelReady）算出此刻真正能收的
+ * 支付方式。
+ *
+ * 这是公开接口，只给支付方式和通道数量，不给插件名、插件编码或接入方式：
+ * 用的是哪家收单平台、是不是个人收款监听，属于商户不想公开的经营细节。
+ */
+function homePublicSummary(registry, channels, pluginConfig) {
+  const counts = new Map();
+  let readyChannels = 0;
+  for (const channel of channels) {
+    if (!channelReady(registry, pluginConfig, channel)) continue;
+    readyChannels += 1;
+    for (const type of channel.pay_types) counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  const rank = (type) => {
+    const index = HOME_PAY_TYPE_ORDER.indexOf(type);
+    return index === -1 ? HOME_PAY_TYPE_ORDER.length : index;
+  };
+  return {
+    channel_count: readyChannels,
+    methods: [...counts.keys()]
+      .sort((left, right) => rank(left) - rank(right))
+      .map((type) => ({ code: type, name: cashierTypeName(type), channel_count: counts.get(type) })),
+  };
+}
+
+async function homeApi(env) {
+  const [siteConfig, channels, pluginConfig] = await Promise.all([
+    runtimeSiteConfig(env), runtimeChannels(env), runtimePluginConfig(env),
+  ]);
+  return jsonResponse({
+    merchant_name: siteConfig.merchant_name,
+    ...homePublicSummary(runtimeOf(env).registry, channels, pluginConfig),
+  });
+}
+
 async function keyManagementApi(request, env) {
   if (!await isAdminSession(request, env)) return unauthorized();
   if (request.method === 'GET') return jsonResponse({ keys: await publicKeyStatus(env) });
@@ -3776,6 +3819,7 @@ async function route(request, env, ctx) {
     return cashierPayOrderStatusApi(request, env);
   }
   if (pathname === '/api/contact' && request.method === 'GET') return contactConfigApi(env);
+  if (pathname === '/api/home' && request.method === 'GET') return homeApi(env);
   if (pathname === '/api/license/attest' && request.method === 'POST') return licenseAttestationApi(request, env);
   if (pathname === '/api/watcher/snapshot' && request.method === 'GET') return watcherSnapshot(request, env);
   const watcherDiscoveryMatch = pathname.match(
