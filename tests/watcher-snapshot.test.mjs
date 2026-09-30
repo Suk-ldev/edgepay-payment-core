@@ -126,8 +126,8 @@ async function snapshotRequest(pluginCodes = 'wxpay_receipt', channels = '') {
   });
 }
 
-async function snapshotEnv() {
-  const configKey = 'watcher-snapshot-config-key';
+// 解密后的插件配置按"设置名 + 密钥"在模块里缓存，同一测试文件里换配置时要换一把密钥。
+async function snapshotEnv(fubeiOverrides = {}, configKey = 'watcher-snapshot-config-key') {
   const settings = new Map([
     ['channels', JSON.stringify([
       {
@@ -158,6 +158,7 @@ async function snapshotEnv() {
         watcher_password: 'fubei-password',
         receipt_terminal_no: 'terminal-1',
         receipt_qrcode_image: `data:image/png;base64,${'B'.repeat(150_000)}`,
+        ...fubeiOverrides,
       },
     }, configKey, 'plugin_config')],
   ]);
@@ -233,4 +234,19 @@ test('没自报通道的监听端，在线状态不写 channel_ids，仍按插�
     .find(([key]) => key.startsWith('watcher_presence:id:yyb-bridge-test'));
   assert.ok(row);
   assert.equal('channel_ids' in JSON.parse(row[1]), false);
+});
+
+// 付呗收款单模式要在下单时由 Worker 建单、按收款单号认领。Docker 只会按金额匹配码牌流水，
+// 把这个账户交给它只会认错单，所以即使 Docker 声明了支持付呗，快照里也不能有它。
+test('付呗收款单模式只由 Worker 处理，不进 Docker 快照', async () => {
+  const worker = createTestWorker();
+  const plateEnv = await snapshotEnv();
+  plateEnv.DB.payments.push(payment(1, { plugin_code: 'fubei_receipt', channel_id: 2, epay_type: 'wxpay' }));
+  const plate = await (await worker.fetch(await snapshotRequest('fubei_receipt'), plateEnv, { waitUntil() {} })).json();
+  assert.deepEqual(plate.accounts.map((account) => account.plugin_code), ['fubei_receipt']);
+
+  const billEnv = await snapshotEnv({ receipt_bill_mode: 'bill' }, 'watcher-snapshot-bill-key');
+  billEnv.DB.payments.push(payment(1, { plugin_code: 'fubei_receipt', channel_id: 2, epay_type: 'wxpay' }));
+  const bill = await (await worker.fetch(await snapshotRequest('fubei_receipt'), billEnv, { waitUntil() {} })).json();
+  assert.deepEqual(bill.accounts, []);
 });

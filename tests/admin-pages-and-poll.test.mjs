@@ -68,7 +68,7 @@ test('公开管理台只内置免费插件教程，付费插件教程随插件�
 
 test('付呗和收钱吧教程随插件提供最近流水查号步骤且不拿其他产品作宣传文案', async () => {
   const [fubei, shouqianba] = await Promise.all([
-    readFile(new URL('../src/free-plugins/fubei-receipt.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/free-plugins/fubei/index.js', import.meta.url), 'utf8'),
     readFile(new URL('../src/free-plugins/shouqianba-receipt.js', import.meta.url), 'utf8'),
   ]);
   for (const source of [fubei, shouqianba]) {

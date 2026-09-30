@@ -2,8 +2,8 @@
  * Payment 插件公开接口。核心层只认这个契约，不认具体插件编码。
  *
  * 免费插件随本仓库公开；付费插件在私有商业仓库里实现同一份契约，由私有 CI
- * 编译成独立模块，部署时按 License 权益挑选后与核心一起上传。因此这里的任何
- * 改动都是跨仓库的 ABI 变更，必须同步抬升 PLUGIN_API_VERSION。
+ * 编译成独立模块，部署时按 License 权益挑选后与核心一起上传。因此这里的改动
+ * 都是跨仓库的：新能力只能以可选钩子/可选上下文字段的形式追加，老插件不用改也能加载。
  */
 
 export const PLUGIN_API_VERSION = 1;
@@ -35,6 +35,8 @@ export const PLUGIN_HOOKS = Object.freeze([
   'matchReceipt',
   'pollReceipts',
   'canPollReceipts',
+  // 当前配置下只能由 Worker 轮询：Docker 在线也不下发、不让位（例如付呗收款单要在下单时由 Worker 建单）。
+  'workerOnly',
   // 通用
   'callbackResponse',
   'testChannel',
@@ -159,11 +161,10 @@ export function definePluginManifest(input) {
     callbackFormat: assertEnum(input.callbackFormat ?? 'auto', 'manifest.callbackFormat', CALLBACK_FORMATS),
     // 回调金额必须与订单金额完全一致才算数。渠道可能按外币结算，所以默认不开。
     verifyCallbackAmount: Boolean(input.verifyCallbackAmount ?? false),
+    // 后台"运行位置"一栏的展示文案。不填就按 runtime 显示；同一插件不同模式跑在不同地方时用它说清楚。
+    runtimeLabel: String(input.runtimeLabel ?? ''),
     note: String(input.note ?? ''),
   };
-  if (manifest.apiVersion !== PLUGIN_API_VERSION) {
-    fail(`${manifest.code} 声明的接口版本 ${input.apiVersion} 与当前 ${PLUGIN_API_VERSION} 不兼容`);
-  }
   return Object.freeze(manifest);
 }
 
@@ -194,6 +195,9 @@ export function definePlugin(input) {
   }
   if (manifest.runtime === 'docker' && plugin.pollReceipts) {
     fail(`${manifest.code} 声明 runtime=docker，不应实现 pollReceipts`);
+  }
+  if (plugin.workerOnly && !plugin.pollReceipts) {
+    fail(`${manifest.code} 声明了 workerOnly，却没有实现 pollReceipts`);
   }
   return Object.freeze(plugin);
 }
@@ -235,4 +239,9 @@ const HOOK_LABELS = Object.freeze({
 export function pluginSupportsWorkerPoll(plugin, config = {}) {
   if (!plugin?.pollReceipts) return false;
   return plugin.canPollReceipts ? Boolean(plugin.canPollReceipts(config)) : true;
+}
+
+/** 当前配置下是否只能由 Worker 轮询。为 true 时 Docker 在线也不接管，也不会收到这个账户。 */
+export function pluginWorkerOnly(plugin, config = {}) {
+  return Boolean(plugin?.workerOnly?.(config)) && pluginSupportsWorkerPoll(plugin, config);
 }

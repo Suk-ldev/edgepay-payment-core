@@ -63,6 +63,26 @@ export async function releasePollLease(env, lease, cooldownSeconds, state = 'idl
   `).bind(valueText, nextAt, lease.settingKey, lease.valueText).run();
 }
 
+/**
+ * 插件在 D1 里的加密登录态。轮询和下单（prepareReceipt）共用同一份，
+ * 这样下单时建的平台会话轮询也能直接用，不用两边各登一次。
+ */
+export async function readPollerState(env, plugin) {
+  if (plugin.manifest.poll.stateless) return {};
+  return readEncryptedJsonSetting(
+    env, `${POLLER_STATE_PREFIX}${plugin.manifest.code}`, encryptionSecret(env), {},
+  );
+}
+
+/** 与 stored 不同才写，省掉每轮一次无意义的加密写入。 */
+export async function writePollerState(env, plugin, next, stored = {}) {
+  if (plugin.manifest.poll.stateless || !next) return;
+  if (JSON.stringify(next) === JSON.stringify(stored)) return;
+  await writeEncryptedJsonSetting(
+    env, `${POLLER_STATE_PREFIX}${plugin.manifest.code}`, encryptionSecret(env), next,
+  );
+}
+
 export async function pollReceiptAccount(runtime, env, account, options = {}) {
   const pluginCode = String(account?.plugin_code ?? '');
   const orders = Array.isArray(account?.orders) ? account.orders : [];
@@ -71,7 +91,7 @@ export async function pollReceiptAccount(runtime, env, account, options = {}) {
   const plugin = runtime.registry.requireHook(pluginCode, 'pollReceipts');
   await runtime.authorizePlugin({ plugin, operation: 'pollReceipts', env });
 
-  const { leaseSeconds, cooldownSeconds, stateless } = plugin.manifest.poll;
+  const { leaseSeconds, cooldownSeconds } = plugin.manifest.poll;
   const lease = await acquirePollLease(env, pluginCode, leaseSeconds);
   if (!lease.acquired) {
     return { plugin_code: pluginCode, status: 'busy', records: [], details: {} };
@@ -79,10 +99,7 @@ export async function pollReceiptAccount(runtime, env, account, options = {}) {
 
   let releaseState = 'idle';
   try {
-    const stateKey = `${POLLER_STATE_PREFIX}${pluginCode}`;
-    const stored = stateless
-      ? {}
-      : await readEncryptedJsonSetting(env, stateKey, encryptionSecret(env), {});
+    const stored = await readPollerState(env, plugin);
     const result = await plugin.pollReceipts(pluginContext(runtime, {
       env,
       config: account.config ?? {},
@@ -90,9 +107,7 @@ export async function pollReceiptAccount(runtime, env, account, options = {}) {
       state: stored,
       fetchImpl: options.fetchImpl ?? null,
     }));
-    if (!stateless && result.state && JSON.stringify(result.state) !== JSON.stringify(stored)) {
-      await writeEncryptedJsonSetting(env, stateKey, encryptionSecret(env), result.state);
-    }
+    await writePollerState(env, plugin, result.state, stored);
     return { plugin_code: pluginCode, status: 'ok', ...result };
   } catch (error) {
     releaseState = 'error';

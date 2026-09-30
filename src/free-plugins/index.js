@@ -5,7 +5,7 @@
 
 import { alipayApiPlugin } from './alipay-api.js';
 import { alipayReceiptPlugin } from './alipay-receipt.js';
-import { fubeiReceiptPlugin } from './fubei-receipt.js';
+import { fubeiReceiptPlugin } from './fubei/index.js';
 import { shouqianbaReceiptPlugin } from './shouqianba-receipt.js';
 import { wechatApiPlugin } from './wechat-api.js';
 import { wxpayReceiptPlugin } from './wxpay-receipt.js';

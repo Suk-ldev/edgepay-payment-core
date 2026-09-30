@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { webcrypto } from 'node:crypto';
 import { acquirePollLease, releasePollLease } from '../src/receipt-poller.js';
-import { buildWorkerFubeiQuery, normalizeWorkerFubeiRecords, queryWorkerFubei } from '../src/free-plugins/fubei-receipt.js';
+import { buildWorkerFubeiQuery, normalizeWorkerFubeiRecords, queryWorkerFubei } from '../src/free-plugins/fubei/index.js';
 import { queryWorkerShouqianba } from '../src/free-plugins/shouqianba-receipt.js';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;

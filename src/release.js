@@ -5,7 +5,7 @@
  * generate-build-info.mjs 每次发行现写，不会漂。这里只是兜底，
  * 发行时顺手跟上，别让它再退化成一个谁都不认识的数字。
  */
-export const CURRENT_RELEASE_VERSION = '2.1.20';
+export const CURRENT_RELEASE_VERSION = '2.1.21';
 
 export const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 

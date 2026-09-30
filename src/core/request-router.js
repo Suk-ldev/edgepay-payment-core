@@ -38,8 +38,10 @@ import {
 import {
   publicKeyStatus, revokePreviousRuntimeKey, rotateRuntimeKey, withRuntimeKeys,
 } from '../runtime-keys.js';
-import { pluginSupportsWorkerPoll, unsupportedHook } from '../plugin-api.js';
-import { pollReceiptAccount, workerPollerAvailable } from '../receipt-poller.js';
+import { pluginSupportsWorkerPoll, pluginWorkerOnly, unsupportedHook } from '../plugin-api.js';
+import {
+  pollReceiptAccount, readPollerState, workerPollerAvailable, writePollerState,
+} from '../receipt-poller.js';
 import {
   WATCHER_FAILOVER_STATE_KEY, countAvailableChannelsByPayType, normalizeWatcherFailoverState,
   planWatcherFailovers, reconcileWatcherFailoverState, trackedWatcherFailoverChannelIds,
@@ -486,13 +488,20 @@ function uniqueRemarkCode(active) {
   throw new Error('当前账号可用付款备注已用尽');
 }
 
-async function receiptPresentation(env, plugin, config, amountFen, expiresAt, payType) {
+async function receiptPresentation(env, plugin, config, amountFen, expiresAt, payType, paymentNo) {
   const activePayments = await activeReceiptPayments(env, plugin.manifest.code);
-  // 有自己收款形态的插件（例如链上地址池）自行生成展示；其余走下面这套通用收款码。
+  // 有自己收款形态的插件（例如链上地址池、付呗收款单）自行生成展示；
+  // 返回 null 表示当前配置下仍用下面这套通用收款码。
   if (plugin.prepareReceipt) {
-    return plugin.prepareReceipt(callContext(env, {
-      config, amountFen, expiresAt, payType, activePayments,
+    const state = await readPollerState(env, plugin);
+    const prepared = await plugin.prepareReceipt(callContext(env, {
+      config, amountFen, expiresAt, payType, activePayments, paymentNo, state, fetchImpl: null,
     }));
+    if (prepared) {
+      const { state: nextState, ...setup } = prepared;
+      await writePollerState(env, plugin, nextState, state);
+      return setup;
+    }
   }
   const active = activePayments;
   const qrcode = String(config.receipt_qrcode_content ?? '');
@@ -663,7 +672,7 @@ function paymentSnapshot(payment, metadata) {
   };
 }
 
-async function pluginSetup(env, fields, channel) {
+async function pluginSetup(env, fields, channel, paymentNo) {
   const plugin = pluginOf(env, channel.plugin_code);
   const { registry } = runtimeOf(env);
   // 收银台要把收款码渲染出来，得补水；但一次只渲染这一个插件的那一张，
@@ -677,7 +686,7 @@ async function pluginSetup(env, fields, channel) {
   const expireMinutes = channelExpireMinutes(channel, siteConfig.order_expire_minutes);
   const expiresAt = expiringAt(expireMinutes * 60);
   const receiptSetup = plugin.manifest.mode === 'channel-notify'
-    ? await receiptPresentation(env, plugin, config, fields.amountFen, expiresAt, fields.type)
+    ? await receiptPresentation(env, plugin, config, fields.amountFen, expiresAt, fields.type, paymentNo)
     : null;
   return { plugin, config, expiresAt, expireMinutes, receiptSetup };
 }
@@ -718,7 +727,7 @@ async function activateCashierAttempt(request, env, fields, channel, existing, m
     return { payment: existing, metadata: currentMetadata, duplicate: true };
   }
 
-  const setup = await pluginSetup(env, fields, channel);
+  const setup = await pluginSetup(env, fields, channel, existing.payment_no);
   let metadata = {
     ...currentMetadata,
     protocol: 'epay_v1',
@@ -806,8 +815,8 @@ async function createPaymentAttempt(request, env, fields, channel, metadataOverr
   }
   if (existing) return { payment: existing, metadata: parseJson(existing.metadata_json), duplicate: true };
 
-  const setup = await pluginSetup(env, fields, channel);
   const paymentNo = createPaymentNo();
+  const setup = await pluginSetup(env, fields, channel, paymentNo);
   const createdAt = timestamp();
   let metadata = {
     protocol: 'epay_v1', epay_type: fields.type, name: fields.name, param: fields.param, buyer: fields.buyer,
@@ -1310,6 +1319,8 @@ async function receiptWatcherAccounts(env, options = {}) {
     const plugin = registry.get(channel.plugin_code);
     return channel.enabled && plugin?.manifest.mode === 'channel-notify'
       && (!supported || supported.has(basePluginCode(channel.plugin_code)))
+      // 下发给 Docker 的快照里不能有只能由 Worker 处理的账户，否则 Docker 会拿自己的规则去匹配。
+      && (!supported || !pluginWorkerOnly(plugin, configForPlugin(pluginConfig, channel.plugin_code)))
       && licenseCovers(licensed, channel.plugin_code)
       && pluginEnabled(registry, pluginConfig, channel.plugin_code);
   });
@@ -1914,11 +1925,13 @@ async function applyWatcherRecord(env, ctx, plugin, pluginConfig, record, raw) {
   if (await receiptEventSeen(env, plugin.manifest.code, eventId)) return { duplicate: true };
   const payments = await mutableReceiptPayments(env, plugin.manifest.code);
   const now = timestamp();
-  const matched = plugin.matchReceipt
+  // 插件返回 null 表示这条流水按通用规则（金额/备注）匹配，例如付呗码牌模式。
+  const custom = plugin.matchReceipt
     ? await plugin.matchReceipt(callContext(env, {
       config: pluginConfig, payments, record, eventId, now,
     }))
-    : defaultReceiptMatch(payments, record, eventId, now);
+    : null;
+  const matched = custom ?? defaultReceiptMatch(payments, record, eventId, now);
   const paidAt = paidAtIso(record.paid_at);
   if (!paidAt) throw new Error(`${plugin.manifest.name}流水缺少支付时间`);
   return confirmReceipt(env, ctx, plugin, matched.payment, {
@@ -2047,6 +2060,7 @@ async function runReceiptPoll(env, ctx, trigger = 'scheduled', workerOnly = fals
       };
     }
     if (workerPollerAvailable(runtimeOf(env).registry, account.plugin_code, account.config)
+      && !pluginWorkerOnly(plugin, account.config)
       && watcherPlugins.has(basePluginCode(account.plugin_code))) {
       return {
         plugin_code: account.plugin_code,

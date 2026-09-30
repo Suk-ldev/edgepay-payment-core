@@ -3,7 +3,7 @@
  * 插件不直接 import 核心内部模块——这样付费插件才能被单独编译成独立模块，
  * 在部署时按 License 权益拼装进 Worker。
  *
- * helpers 是这份 ABI 的一部分：增删字段必须抬升 PLUGIN_API_VERSION。
+ * helpers 是这份 ABI 的一部分：只能加字段，不能删改，否则已编译的付费插件会坏。
  */
 
 import {

@@ -78,6 +78,7 @@ export function publicPluginList(registry, config) {
       tier: manifest.tier,
       mode: manifest.mode,
       runtime: manifest.runtime,
+      runtimeLabel: manifest.runtimeLabel,
       payTypes: [...manifest.payTypes],
       required: [...manifest.required],
       note: manifest.note,

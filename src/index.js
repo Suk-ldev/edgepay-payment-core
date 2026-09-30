@@ -13,7 +13,7 @@ export { RUNTIME_KEY, runtimeOf } from './core/runtime-env.js';
 export { freePlugins, FREE_PLUGIN_CODES } from './free-plugins/index.js';
 export {
   PLUGIN_API_VERSION, definePlugin, definePluginManifest, pluginMissingFields,
-  pluginSupportsWorkerPoll, unsupportedHook,
+  pluginSupportsWorkerPoll, pluginWorkerOnly, unsupportedHook,
 } from './plugin-api.js';
 
 // 少数模块被测试直接引用，保持可达。

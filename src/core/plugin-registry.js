@@ -1,7 +1,7 @@
 /**
  * 插件注册器。核心层通过它按编码取插件，不再出现 `if (code === 'stripe_api')`。
  *
- * 注册表在 Worker 模块初始化时构建一次：编码重复、接口版本不符都在这里直接抛错，
+ * 注册表在 Worker 模块初始化时构建一次：编码重复在这里直接抛错，
  * 让构建产物在第一次请求之前就暴露问题，而不是在某条支付链路上才崩。
  *
  * 副本编码（`wxpay_receipt~2`）也从这里取：注册表按基础编码找到插件，再套一层
@@ -9,7 +9,7 @@
  * 作配置键、订单插件列、租约键和流水去重源，所以拿到视图之后两个账号就自然分开了。
  */
 
-import { PLUGIN_API_VERSION, PLUGIN_HOOKS, pluginMissingFields, unsupportedHook } from '../plugin-api.js';
+import { PLUGIN_HOOKS, pluginMissingFields, unsupportedHook } from '../plugin-api.js';
 import {
   basePluginCode, defaultInstanceName, isPluginInstanceCode, pluginInstanceSequence,
 } from '../plugin-instances.js';
@@ -21,9 +21,6 @@ export function createPluginRegistry(plugins) {
   for (const plugin of plugins) {
     const manifest = plugin?.manifest;
     if (!manifest?.code) throw new Error('插件缺少 manifest.code，可能未经 definePlugin 定义');
-    if (manifest.apiVersion !== PLUGIN_API_VERSION) {
-      throw new Error(`插件 ${manifest.code} 接口版本 ${manifest.apiVersion} 与核心 ${PLUGIN_API_VERSION} 不兼容`);
-    }
     if (registry.has(manifest.code)) throw new Error(`插件编码重复：${manifest.code}`);
     registry.set(manifest.code, plugin);
   }

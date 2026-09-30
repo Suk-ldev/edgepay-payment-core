@@ -109,6 +109,7 @@ function basePluginCode(code) {
 }
 
 function modeName(plugin) {
+  if (plugin.runtimeLabel) return plugin.runtimeLabel;
   return {
     direct: '官方直连',
     worker: 'Worker 内置',
