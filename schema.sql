@@ -135,3 +135,20 @@ CREATE TABLE IF NOT EXISTS admin_login_limits (
 
 CREATE INDEX IF NOT EXISTS idx_admin_login_limits_updated
   ON admin_login_limits(updated_at);
+
+-- 数据迁移（可重复执行）：订单里内联的收款码图片换成占位符。
+-- 早先每笔收款码订单都在 presentation.pay_params.qrcode_image 复制一份插件配置里的
+-- 收款码（一两百 KB），订单列表、状态轮询这些 SELECT * 都得拖着它走。现在订单只存
+-- 占位符，出站时按插件配置补回。D1 单条语句有时长上限，每次升级最多换 2000 行，
+-- 剩下的下次升级接着换。json_valid 放在 CASE 里先判，坏 JSON 不会让整个升级失败。
+UPDATE payment_attempts
+SET metadata_json = json_set(metadata_json, '$.presentation.pay_params.qrcode_image', '__edgepay_asset_v1__')
+WHERE payment_no IN (
+  SELECT payment_no FROM payment_attempts
+  WHERE length(metadata_json) > 4096
+    AND CASE WHEN json_valid(metadata_json)
+      THEN json_extract(metadata_json, '$.presentation.pay_params.qrcode_image') LIKE 'data:%'
+      ELSE 0 END
+  ORDER BY created_at DESC
+  LIMIT 2000
+);

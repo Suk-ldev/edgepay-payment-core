@@ -25,7 +25,7 @@ import {
   selectPersonalReceipt, verifyStaticPollToken, verifyWatcherSnapshotRequest, watcherRecords,
 } from '../receipt-plugins.js';
 import {
-  readEncryptedJsonSetting, readPlainJsonSetting, writeEncryptedJsonSetting,
+  readCachedPlainJsonSetting, readEncryptedJsonSetting, readPlainJsonSetting, writeEncryptedJsonSetting,
   writePlainJsonSetting,
 } from '../runtime-settings.js';
 import {
@@ -427,7 +427,7 @@ async function runtimeSiteConfig(env) {
     contact_avatar_image: env.CONTACT_AVATAR_IMAGE ?? DEFAULT_SITE_CONFIG.contact_avatar_image,
     contact_qrcode_image: env.CONTACT_QRCODE_IMAGE ?? DEFAULT_SITE_CONFIG.contact_qrcode_image,
   });
-  const stored = await readPlainJsonSetting(env, 'site_config', fallback);
+  const stored = await readCachedPlainJsonSetting(env, 'site_config', fallback);
   const normalized = normalizeSiteConfig({ ...fallback, ...(stored ?? {}) });
   if (normalized.contact_qrcode_image === '/contact/default-qrcode.png') {
     normalized.contact_qrcode_image = '';
@@ -464,7 +464,7 @@ async function activeReceiptPayments(env, pluginCode) {
   return results.map((payment) => ({ ...payment, metadata: parseJson(payment.metadata_json) }));
 }
 
-function configuredReceiptImage(plugin, config) {
+function configuredReceiptImage(config) {
   const configured = String(config.receipt_qrcode_image ?? '').trim();
   // 占位符漏到这里说明调用方忘了补水。当成"没配收款码"让上层抛一句人话，
   // 好过把这串标记塞进 <img> 渲染成一个裂掉的图。
@@ -472,6 +472,19 @@ function configuredReceiptImage(plugin, config) {
   if (['/wechat.png', '/fubei.jpg'].includes(configured)) return '';
   if (configured && !/^[A-Za-z]:[\\/]/u.test(configured)) return configured;
   return '';
+}
+
+/**
+ * 订单里的收款码只存占位符（见 receiptPresentation），交给付款人之前换回插件配置里那张图。
+ * 配置里的图换过就给新的——付款人要扫的本来就是当前这张码。
+ */
+async function presentationForPayer(env, pluginCode, presentation) {
+  const payParams = presentation?.pay_params;
+  if (payParams?.qrcode_image !== ASSET_VALUE_MARKER) return presentation;
+  const config = configForPlugin(await runtimePluginConfigWithAssets(env, pluginCode), pluginCode);
+  const { qrcode_image: _marker, ...rest } = payParams;
+  const image = configuredReceiptImage(config);
+  return { ...presentation, pay_params: image ? { ...rest, qrcode_image: image } : rest };
 }
 
 function uniqueRemarkCode(active) {
@@ -505,7 +518,7 @@ async function receiptPresentation(env, plugin, config, amountFen, expiresAt, pa
   }
   const active = activePayments;
   const qrcode = String(config.receipt_qrcode_content ?? '');
-  const qrcodeImage = configuredReceiptImage(plugin, config);
+  const qrcodeImage = configuredReceiptImage(config);
   if (!qrcode && !qrcodeImage) throw new Error(`${plugin.manifest.name}未配置收款码`);
   const mode = String(config.receipt_match_mode ?? 'amount') === 'remark' ? 'remark' : 'amount';
   const receipt = {
@@ -550,7 +563,9 @@ async function receiptPresentation(env, plugin, config, amountFen, expiresAt, pa
     payParams.tips = `付款备注：${receipt.remark_code}`;
   }
   if (qrcode) payParams.qrcode = qrcode;
-  if (qrcodeImage) payParams.qrcode_image = qrcodeImage;
+  // 收款码图片一两百 KB，每单复制一份会让订单行跟着膨胀：订单列表、状态轮询这些
+  // SELECT * 全得拖着它走，库在远端时直接读超时。订单里只记占位符，出站前再补回。
+  if (qrcodeImage) payParams.qrcode_image = ASSET_VALUE_MARKER;
   return {
     metadata: { [PERSONAL_RECEIPT_KEY]: receipt },
     presentation: {
@@ -951,7 +966,7 @@ async function createEpayAttempt(request, env, input, isMapi) {
   return createPaymentAttempt(request, env, fields, channel, { epay_requested_type: requestedType });
 }
 
-function mapiResponse(request, attempt) {
+async function mapiResponse(request, env, attempt) {
   const payUrl = attempt.cashier
     ? cashierUrl(request, attempt.payment.external_order_no)
     : String(
@@ -959,8 +974,12 @@ function mapiResponse(request, attempt) {
       ?? checkoutUrl(request, attempt.payment.payment_no),
     );
   const response = { code: 1, msg: '提交成功', trade_no: attempt.payment.payment_no, payurl: payUrl };
-  const presentation = attempt.metadata.presentation ?? {};
-  const payParams = attempt.metadata.presentation?.pay_params ?? {};
+  const presentation = await presentationForPayer(
+    env,
+    attempt.payment.plugin_code,
+    attempt.metadata.presentation,
+  ) ?? {};
+  const payParams = presentation.pay_params ?? {};
   if (payParams.qrcode) response.qrcode = payParams.qrcode;
   if (payParams.qrcode_image) response.qrcode = payParams.qrcode_image;
   if (presentation.pay_product) response.pay_product = presentation.pay_product;
@@ -1001,7 +1020,7 @@ async function epaySubmit(request, env) {
 }
 
 async function epayMapi(request, env) {
-  try { return mapiResponse(request, await createEpayAttempt(request, env, await readEpayPayload(request), true)); }
+  try { return await mapiResponse(request, env, await createEpayAttempt(request, env, await readEpayPayload(request), true)); }
   catch (error) { return jsonResponse({ code: 0, msg: String(error.message ?? error) }, Number(error.status) || 200); }
 }
 
@@ -2765,7 +2784,11 @@ async function cashierConfirmApi(request, env) {
       existing,
       { cashier_attempt_count: Number(currentMetadata.cashier_attempt_count ?? 0) + 1 },
     );
-    const presentation = publicPresentation(attempt.metadata.presentation);
+    const presentation = publicPresentation(await presentationForPayer(
+      env,
+      attempt.payment.plugin_code,
+      attempt.metadata.presentation,
+    ));
     return cashierApiResponse({
       biz_no: existing.external_order_no,
       trade_no: attempt.payment.payment_no,
@@ -2811,7 +2834,7 @@ async function cashierPayOrderApi(request, env) {
     const siteConfig = await runtimeSiteConfig(env);
     const metadata = parseJson(payment.metadata_json);
     const presentation = publicPresentation(
-      metadata.presentation,
+      await presentationForPayer(env, payment.plugin_code, metadata.presentation),
       Math.floor(Date.now() / 1_000),
     );
     const status = cashierStatus(effectivePaymentStatus(payment));

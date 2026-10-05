@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { webcrypto } from 'node:crypto';
 import {
-  decryptSetting, encryptSetting, readEncryptedJsonSetting, writeEncryptedJsonSetting,
+  decryptSetting, encryptSetting, readCachedPlainJsonSetting, readEncryptedJsonSetting, writeEncryptedJsonSetting,
+  writePlainJsonSetting,
 } from '../src/runtime-settings.js';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -83,4 +84,60 @@ test('同一加密配置在 isolate 内复用，写入后立即替换缓存', as
   await writeEncryptedJsonSetting(env, 'cache-test', 'cache-secret', { version: 2 });
   assert.deepEqual(await readEncryptedJsonSetting(env, 'cache-test', 'cache-secret', {}), { version: 2 });
   assert.equal(reads, 0);
+});
+
+/** 计数的设置表：按 setting_key 存取，记下真正打到库上的读取次数。 */
+function countingSettingsEnv(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  const env = {
+    reads: 0,
+    DB: {
+      prepare() {
+        return {
+          bind(...params) {
+            return {
+              async first() {
+                env.reads += 1;
+                return values.has(params[0]) ? { value_text: values.get(params[0]) } : null;
+              },
+              async run() {
+                values.set(params[0], params[1]);
+                return { meta: { changes: 1 } };
+              },
+            };
+          },
+        };
+      },
+    },
+  };
+  return env;
+}
+
+test('site_config 这类大明文配置一分钟内只读一次库，本进程写入后立即读到新值', async () => {
+  const env = countingSettingsEnv({ site_config: JSON.stringify({ merchant_name: '旧名字' }) });
+  assert.deepEqual(await readCachedPlainJsonSetting(env, 'site_config', null), { merchant_name: '旧名字' });
+  assert.deepEqual(await readCachedPlainJsonSetting(env, 'site_config', null), { merchant_name: '旧名字' });
+  assert.equal(env.reads, 1);
+
+  await writePlainJsonSetting(env, 'site_config', { merchant_name: '新名字' });
+  assert.deepEqual(await readCachedPlainJsonSetting(env, 'site_config', null), { merchant_name: '新名字' });
+  assert.equal(env.reads, 2);
+
+  // 缓存按库分开：另一个库里没有这条设置，拿到的是它自己的兜底值。
+  const other = countingSettingsEnv();
+  assert.equal(await readCachedPlainJsonSetting(other, 'site_config', 'fallback'), 'fallback');
+});
+
+// Makers 每个请求都会重新执行一遍模块，等于每次拿到一份新的模块实例。缓存要是放在
+// 模块变量里，换一份实例就全丢了；放在 globalThis 上才能跨请求命中。
+test('配置缓存跨模块实例共享（Makers 每个请求重新执行模块）', async () => {
+  const fresh = await import('../src/runtime-settings.js?makers-request=2');
+  const env = countingSettingsEnv();
+  await writeEncryptedJsonSetting(env, 'shared-cache-test', 'shared-secret', { version: 1 });
+  assert.deepEqual(await fresh.readEncryptedJsonSetting(env, 'shared-cache-test', 'shared-secret', {}), { version: 1 });
+
+  const plain = countingSettingsEnv({ site_config: JSON.stringify({ merchant_name: 'Suk' }) });
+  await readCachedPlainJsonSetting(plain, 'site_config', null);
+  await fresh.readCachedPlainJsonSetting(plain, 'site_config', null);
+  assert.equal(env.reads + plain.reads, 1, '另一份模块实例应直接命中缓存');
 });

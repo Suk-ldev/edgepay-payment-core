@@ -1,7 +1,20 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const ENCRYPTED_CACHE_MILLISECONDS = 60_000;
-const encryptedJsonCache = new Map();
+// 缓存挂在 globalThis 上：Makers 每个请求都会重新执行一遍模块，模块级变量每次都是新的，
+// 只有 globalThis 跨请求保留（见 payment-makers/src/pg-pool.js）。放在模块里，
+// Makers 上每个请求都得重新拉一遍插件配置和收款码图片，库在远端时这就是秒级的开销。
+const encryptedJsonCache = (globalThis[Symbol.for('edgepay.settings.encryptedJsonCache')] ??= new Map());
+// 明文配置按 env.DB 分开缓存，不同的库（测试里每个用例一个）互不串值。
+const plainJsonCache = (globalThis[Symbol.for('edgepay.settings.plainJsonCache')] ??= new WeakMap());
+
+function plainCacheOf(env) {
+  const database = env.DB;
+  if (!database || typeof database !== 'object') return null;
+  let entries = plainJsonCache.get(database);
+  if (!entries) plainJsonCache.set(database, (entries = new Map()));
+  return entries;
+}
 
 function encryptedCacheKey(settingKey, secret) {
   return `${String(settingKey)}\u0000${String(secret)}`;
@@ -92,6 +105,7 @@ export async function writeSetting(env, settingKey, valueText) {
     ON CONFLICT(setting_key) DO UPDATE SET value_text = excluded.value_text, updated_at = excluded.updated_at
   `).bind(settingKey, String(valueText), now).run();
   invalidateEncryptedCache(settingKey);
+  plainCacheOf(env)?.delete(String(settingKey));
 }
 
 export async function readEncryptedJsonSetting(env, settingKey, secret, fallback) {
@@ -120,6 +134,20 @@ export async function readPlainJsonSetting(env, settingKey, fallback) {
   const stored = await readSetting(env, settingKey);
   if (!stored) return fallback;
   try { return JSON.parse(stored); } catch { throw new Error(`${settingKey} 运行配置不是合法 JSON`); }
+}
+
+/**
+ * 带一分钟缓存的明文配置，只给"大而少变"的设置用（site_config 内联了联系人头像和二维码，
+ * 一百 KB 上下，下单和收银台每次都要读）。租约、在线状态这类要求实时的设置不能走这里。
+ * 返回值是共享的，调用方不能就地修改。
+ */
+export async function readCachedPlainJsonSetting(env, settingKey, fallback) {
+  const entries = plainCacheOf(env);
+  const cached = entries?.get(String(settingKey));
+  if (cached?.expiresAt > Date.now()) return cached.value;
+  const value = await readPlainJsonSetting(env, settingKey, fallback);
+  entries?.set(String(settingKey), { value, expiresAt: Date.now() + ENCRYPTED_CACHE_MILLISECONDS });
+  return value;
 }
 
 export async function writePlainJsonSetting(env, settingKey, value) {
