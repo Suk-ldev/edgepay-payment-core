@@ -6,7 +6,9 @@ export function safeWebhookUrl(value) {
     const privateIpv6 = host === '::1' || host === '[::1]'
       || /^\[?(?:fc|fd|fe8|fe9|fea|feb)[0-9a-f:]*\]?$/u.test(host);
     const localName = host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local');
-    return url.protocol === 'https:' && !url.username && !url.password && !localName && !privateIpv4 && !privateIpv6;
+    // 不少商户站点只有 http，强制 https 会让下单和回调都失败；内网/本地地址照旧拦，防 SSRF。
+    const webProtocol = url.protocol === 'https:' || url.protocol === 'http:';
+    return webProtocol && !url.username && !url.password && !localName && !privateIpv4 && !privateIpv6;
   } catch {
     return false;
   }

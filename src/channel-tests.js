@@ -1,5 +1,5 @@
 import {
-  fenToMoney, isHttpsUrl, moneyToFen, requireText,
+  fenToMoney, isPublicHttpUrl, moneyToFen, requireText,
 } from './epay-v1.js';
 import { basePluginCode } from './plugin-instances.js';
 
@@ -40,8 +40,8 @@ function optionalIdentity(value, label) {
 function optionalUrl(value, fieldName) {
   const normalized = String(value ?? '').trim();
   if (normalized.length > 255) throw new Error(`${fieldName}长度不能超过 255 个字符`);
-  if (normalized && !isHttpsUrl(normalized)) {
-    throw new Error(`${fieldName}必须是非本地 HTTPS 地址，或留空`);
+  if (normalized && !isPublicHttpUrl(normalized)) {
+    throw new Error(`${fieldName}必须是非本地 http/https 地址，或留空`);
   }
   return normalized;
 }

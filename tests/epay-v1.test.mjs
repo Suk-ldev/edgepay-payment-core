@@ -24,10 +24,12 @@ test('ePay V1 金额按分精确处理', () => {
   assert.throws(() => moneyToFen('1.234'));
 });
 
-test('商户通知只接受公共 HTTPS 地址', () => {
+test('商户通知接受公共 http/https 地址，拒绝本地与其他协议', () => {
   assert.equal(safeWebhookUrl('https://example.com/notify'), true);
-  assert.equal(safeWebhookUrl('http://example.com/notify'), false);
+  assert.equal(safeWebhookUrl('http://example.com/notify'), true);
   assert.equal(safeWebhookUrl('https://127.0.0.1/notify'), false);
+  assert.equal(safeWebhookUrl('http://192.168.1.10/notify'), false);
+  assert.equal(safeWebhookUrl('ftp://example.com/notify'), false);
 });
 
 test('ePay 请求体在读取前按 Content-Length 拒绝超限 body', async () => {

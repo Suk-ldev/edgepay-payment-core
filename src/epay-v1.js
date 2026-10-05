@@ -136,7 +136,7 @@ export function optionalText(payload, key, maxLength = 255) {
   return value;
 }
 
-export function isHttpsUrl(value) {
+export function isPublicHttpUrl(value) {
   return safeWebhookUrl(value);
 }
 

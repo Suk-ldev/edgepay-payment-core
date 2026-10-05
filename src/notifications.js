@@ -87,7 +87,7 @@ export async function dispatchNotificationTask(env, task) {
   const fresh = await env.DB.prepare('SELECT * FROM notification_tasks WHERE id = ?').bind(task.id).first();
   if (!fresh || !safeWebhookUrl(fresh.notify_url)) {
     await env.DB.prepare(`UPDATE notification_tasks SET status = 'GAVE_UP', last_error = ?, updated_at = ? WHERE id = ?`)
-      .bind('notify_url 必须是非本地 HTTPS 地址', now(), task.id).run();
+      .bind('notify_url 必须是非本地 http/https 地址', now(), task.id).run();
     return { skipped: true };
   }
 

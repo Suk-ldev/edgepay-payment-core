@@ -16,7 +16,7 @@ import {
 import { dispatchDueNotifications, enqueuePaymentNotification, staleSendingBefore } from '../notifications.js';
 import { jsonResponse } from '../security.js';
 import {
-  appendQuery, fenToMoney, isHttpsUrl, moneyToFen, optionalText,
+  appendQuery, fenToMoney, isPublicHttpUrl, moneyToFen, optionalText,
   readEpayPayload, requireText, signEpayV1, verifyEpayV1,
 } from '../epay-v1.js';
 import {
@@ -590,8 +590,8 @@ function validateSubmit(input, isMapi) {
     authCode: optionalText(input, 'auth_code', 128),
     clientIp,
   };
-  if (!isHttpsUrl(values.notifyUrl)) throw new Error('notify_url 必须是非本地 HTTPS 地址');
-  if (values.returnUrl && !isHttpsUrl(values.returnUrl)) throw new Error('return_url 必须是非本地 HTTPS 地址');
+  if (!isPublicHttpUrl(values.notifyUrl)) throw new Error('notify_url 必须是非本地 http/https 地址');
+  if (values.returnUrl && !isPublicHttpUrl(values.returnUrl)) throw new Error('return_url 必须是非本地 http/https 地址');
   return values;
 }
 
