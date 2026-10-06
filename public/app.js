@@ -297,12 +297,18 @@ function renderLicenseProblem(license) {
     return;
   }
   const unavailable = license.errorCode === 'license_service_unavailable' || license.retryable;
-  const title = unavailable
-    ? '授权服务暂时不可达，当前没有可用的本地授权缓存'
-    : 'License 校验没有通过，付费插件暂时按未购买处理';
-  const action = unavailable
-    ? '这通常不是 License 或绑定域名填写错误，无需重新填写或重新部署。免费插件不受影响，请稍后刷新重试。'
-    : '免费插件不受影响。请核对 Worker 的 EDGEPAY_LICENSE、PUBLIC_BASE_URL 与 License 绑定域名。';
+  // 名额被占和"连不上"、"License 不对"都不是一回事：不用等，也不用改配置，解绑旧实例就好。
+  const conflict = license.errorCode === 'license_instance_conflict';
+  const title = conflict
+    ? 'License 的 Worker 名额被其他实例占用，付费插件暂时按未购买处理'
+    : unavailable
+      ? '授权服务暂时不可达，当前没有可用的本地授权缓存'
+      : 'License 校验没有通过，付费插件暂时按未购买处理';
+  const action = conflict
+    ? '通常是迁移平台或重建数据库后留下的旧 Worker。按上面的提示解绑旧实例后刷新本页即可，无需重新部署；免费插件不受影响。'
+    : unavailable
+      ? '这通常不是 License 或绑定域名填写错误，无需重新填写或重新部署。免费插件不受影响，请稍后刷新重试。'
+      : '免费插件不受影响。请核对 Worker 的 EDGEPAY_LICENSE、PUBLIC_BASE_URL 与 License 绑定域名。';
   host.hidden = false;
   host.innerHTML = `<div class="ui-alert ui-alert-error">
     <div>

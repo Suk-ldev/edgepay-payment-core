@@ -130,6 +130,24 @@ export async function writeEncryptedJsonSetting(env, settingKey, secret, value) 
   });
 }
 
+/**
+ * 只在该设置还不存在时写入，返回库里最终那一份——自己写进去的，或别的请求抢先写进去的。
+ *
+ * 给"首次生成、之后永不改"的值用（比如 Worker 的授权设备身份）。新库刚上线时几个请求
+ * 会同时发现"还没有"、各自生成；用 writeEncryptedJsonSetting 的话后写的覆盖先写的，
+ * 而先写的那份可能已经被拿去用了（身份已在授权站绑定），从此两边对不上。
+ */
+export async function claimEncryptedJsonSetting(env, settingKey, secret, value) {
+  await env.DB.prepare(`
+    INSERT INTO runtime_settings (setting_key, value_text, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(setting_key) DO NOTHING
+  `).bind(settingKey, await encryptSetting(value, secret, settingKey), new Date().toISOString()).run();
+  // 之前读到的"不存在"还在缓存里，必须清掉再回读库里的胜出值。
+  invalidateEncryptedCache(settingKey);
+  return readEncryptedJsonSetting(env, settingKey, secret, null);
+}
+
 export async function readPlainJsonSetting(env, settingKey, fallback) {
   const stored = await readSetting(env, settingKey);
   if (!stored) return fallback;

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { webcrypto } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import {
-  decryptSetting, encryptSetting, readCachedPlainJsonSetting, readEncryptedJsonSetting, writeEncryptedJsonSetting,
-  writePlainJsonSetting,
+  claimEncryptedJsonSetting, decryptSetting, encryptSetting, readCachedPlainJsonSetting, readEncryptedJsonSetting,
+  writeEncryptedJsonSetting, writePlainJsonSetting,
 } from '../src/runtime-settings.js';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -140,4 +141,49 @@ test('配置缓存跨模块实例共享（Makers 每个请求重新执行模块�
   await readCachedPlainJsonSetting(plain, 'site_config', null);
   await fresh.readCachedPlainJsonSetting(plain, 'site_config', null);
   assert.equal(env.reads + plain.reads, 1, '另一份模块实例应直接命中缓存');
+});
+
+/** 真 SQLite 上的最小 D1 外形：ON CONFLICT 的语义由数据库自己决定，不靠假实现模拟。 */
+function sqliteSettingsEnv() {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE runtime_settings (setting_key TEXT PRIMARY KEY, value_text TEXT NOT NULL, updated_at TEXT NOT NULL)');
+  return {
+    db,
+    DB: {
+      prepare(sql) {
+        const statement = db.prepare(sql);
+        let values = [];
+        return {
+          bind(...next) { values = next; return this; },
+          async first() { return statement.get(...values) ?? null; },
+          async run() { return { meta: { changes: Number(statement.run(...values).changes) } }; },
+        };
+      },
+    },
+  };
+}
+
+test('claimEncryptedJsonSetting：先落库的胜出，后来者拿到的是库里那份而不是自己的', async () => {
+  // 新库刚上线时多个请求会同时生成 Worker 授权身份。原来后写覆盖先写，
+  // 先写的那份已经在授权站绑定了，库里留下的那份再申请授权就永远 409。
+  const env = sqliteSettingsEnv();
+  const key = 'claim_test_first_wins';
+  const secret = 'claim-secret-1';
+  // 先读一次"不存在"，让缓存里留下 null——claim 必须绕过它回读库。
+  assert.equal(await readEncryptedJsonSetting(env, key, secret, null), null);
+  const first = await claimEncryptedJsonSetting(env, key, secret, { id: 'first' });
+  const second = await claimEncryptedJsonSetting(env, key, secret, { id: 'second' });
+  assert.deepEqual(first, { id: 'first' });
+  assert.deepEqual(second, { id: 'first' }, '后来者必须拿到库里已有的值');
+  const stored = env.db.prepare('SELECT value_text FROM runtime_settings WHERE setting_key=?').get(key);
+  assert.deepEqual(await decryptSetting(stored.value_text, secret, key), { id: 'first' });
+});
+
+test('claimEncryptedJsonSetting：并发的首个请求最终都拿到同一份', async () => {
+  const env = sqliteSettingsEnv();
+  const key = 'claim_test_concurrent';
+  const secret = 'claim-secret-2';
+  const results = await Promise.all(['a', 'b', 'c', 'd'].map((id) => claimEncryptedJsonSetting(env, key, secret, { id })));
+  assert.equal(new Set(results.map((value) => value.id)).size, 1, JSON.stringify(results));
+  assert.equal(env.db.prepare('SELECT COUNT(*) AS n FROM runtime_settings').get().n, 1);
 });
