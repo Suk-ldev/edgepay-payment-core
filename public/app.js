@@ -167,6 +167,7 @@ function renderSystemStatus(payload = {}) {
     { key: 'docker', title: '监听器', subtitle: 'Docker Watcher' },
     { key: 'yyb_bridge', title: '应用宝监听', subtitle: 'YYB Bridge' },
     { key: 'android', title: '安卓监听', subtitle: 'Android Watcher' },
+    { key: 'pc', title: 'PC 监听', subtitle: 'PC Watcher' },
   ];
   systemStatusGrid.innerHTML = cards.map(({ key, title, subtitle }) => {
     const listener = listeners[key] ?? {};
@@ -175,7 +176,7 @@ function renderSystemStatus(payload = {}) {
     const online = Math.min(total, Math.max(0, Number(listener.online_instances) || 0));
     const channelIds = Array.isArray(listener.channel_ids) ? listener.channel_ids : [];
     const plugins = Array.isArray(listener.plugins) ? listener.plugins : [];
-    const scope = key === 'android'
+    const scope = key === 'android' || key === 'pc'
       ? (channelIds.length ? `通道 ${channelIds.map((id) => `#${id}`).join('、')}` : '暂无通道')
       : (plugins.length ? `${plugins.length} 个插件` : '暂无插件');
     return `<article class="ui-system-status-card ${meta.className}">
@@ -483,6 +484,15 @@ async function saveSiteConfig(event) {
   }
 }
 
+/** 通道页监听端在线标签：安卓和 PC 走同一条 SmsForwarder 通道，文案按 kind 区分。 */
+function channelPresenceLabel(presence) {
+  const isPc = presence.kind === 'pc';
+  const labels = isPc
+    ? { online: 'PC 在线', offline: 'PC 离线', unknown: '未收到 PC 心跳' }
+    : { online: '手机在线', offline: '手机离线', unknown: '未收到手机心跳' };
+  return labels[presence.status] ?? labels.unknown;
+}
+
 function renderChannels(channels) {
   channelsState = channels.map((channel) => ({ ...channel }));
   channelBody.innerHTML = channels.map((channel) => `<tr data-channel-id="${text(channel.id)}">
@@ -492,7 +502,7 @@ function renderChannels(channels) {
     <td><label class="ui-inline-field ui-channel-pay-type-field"><span class="sr-only">通道 ${text(channel.id)} 支付方式</span><select class="channel-pay-type">${(channel.available_pay_types ?? channel.pay_types).map((payType) => `<option value="${text(payType)}" ${channel.pay_types[0] === payType ? 'selected' : ''}>${text(payType)}</option>`).join('')}</select></label></td>
     <td><label class="ui-inline-field"><span class="sr-only">通道 ${text(channel.id)} 权重</span><input class="channel-weight" type="number" min="0" max="100000" step="1" value="${text(channel.weight)}" /></label><small>相同类型按权重随机</small></td>
     <td><label class="ui-inline-field ui-inline-field--expire"><span class="sr-only">通道 ${text(channel.id)} 订单有效期</span><input class="channel-expire" type="number" min="1" max="1440" step="1" value="${channel.order_expire_minutes == null ? '' : text(channel.order_expire_minutes)}" placeholder="继承全局" /></label><small>${channel.order_expire_minutes == null ? '继承收银台设置' : '分钟'}</small></td>
-    <td><label class="ui-channel-toggle"><input class="channel-enabled" type="checkbox" ${channel.enabled ? 'checked' : ''} /><span>${channel.enabled ? '启用' : '停用'}</span></label>${channel.plugin_enabled ? '' : '<small class="danger-text">插件已停用</small>'}${channel.listener_presence ? `<small class="${channel.listener_presence.status === 'offline' ? 'danger-text' : ''}">${text({ online: '手机在线', offline: '手机离线', unknown: '未收到手机心跳' }[channel.listener_presence.status] ?? '未收到手机心跳')}</small>` : ''}</td>
+    <td><label class="ui-channel-toggle"><input class="channel-enabled" type="checkbox" ${channel.enabled ? 'checked' : ''} /><span>${channel.enabled ? '启用' : '停用'}</span></label>${channel.plugin_enabled ? '' : '<small class="danger-text">插件已停用</small>'}${channel.listener_presence ? `<small class="${channel.listener_presence.status === 'offline' ? 'danger-text' : ''}">${text(channelPresenceLabel(channel.listener_presence))}</small>` : ''}</td>
     <td><div class="ui-channel-actions"><button class="ui-row-action" type="button" data-test-channel="${text(channel.id)}" ${channel.enabled && channel.plugin_enabled ? '' : 'disabled'}>测试</button><button class="ui-row-action ui-row-action-danger" type="button" data-delete-channel="${text(channel.id)}">删除本通道</button></div></td>
   </tr>`).join('');
   applyChannelFilters();

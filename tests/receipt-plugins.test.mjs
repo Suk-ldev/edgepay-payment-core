@@ -187,6 +187,28 @@ test('SmsForwarder 连通性探测心跳已验签但无金额时按探活成功�
     /签名校验失败/u,
   );
 });
+test('PC 监听器心跳同样走 SmsForwarder v2 验签并保留自报身份', async () => {
+  const secret = 'pc-sms-secret';
+  const timestamp = 1_800_000_000_000;
+  const input = {
+    timestamp: String(timestamp),
+    from: 'com.tencent.mm',
+    content: JSON.stringify({
+      title: '微信收款助手',
+      msg: '连通性探测',
+      watcher_kind: 'pc',
+      watcher_instance: 'pcwatcher-1a2b3c',
+    }),
+  };
+  input.sign = await smsSign(secret, input);
+  const parsed = await parseSmsForwarder(input, {
+    sms_forwarder_secret: secret,
+    sms_forwarder_time_tolerance: 300,
+  }, timestamp / 1_000, 'wechat', { method: 'POST', path: '/api/pay/8/notify' });
+  assert.equal(parsed.probe, true);
+  assert.equal(parsed.content.watcher_kind, 'pc');
+  assert.equal(parsed.content.watcher_instance, 'pcwatcher-1a2b3c');
+});
 test('支付宝个人收款使用 SmsForwarder 自监听并解析标题金额', async () => {
   const secret = 'alipay-sms-secret';
   const timestamp = 1_800_000_000_000;

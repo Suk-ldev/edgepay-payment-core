@@ -18,7 +18,7 @@ const PRESENCE_THROTTLE_MS = 30_000;
 /** 早就离线的实例行没有保留价值，顺手清掉，避免键无限增长。 */
 export const PRESENCE_SWEEP_MS = 600_000;
 
-export const WATCHER_KINDS = Object.freeze(['docker', 'yyb_bridge', 'android']);
+export const WATCHER_KINDS = Object.freeze(['docker', 'yyb_bridge', 'android', 'pc']);
 
 const encoder = new TextEncoder();
 
@@ -144,7 +144,12 @@ export async function onlineWatcherPlugins(env, now = Date.now()) {
   return plugins;
 }
 
-/** Android 监听端按通道上报的最近在线状态，供管理台直接显示。 */
+/**
+ * 按通道上报的最近在线状态，供管理台通道页直接显示。
+ *
+ * PC 监听器跟 Android 一样复用 SmsForwarder 入口、一个实例盯一条通道，
+ * 所以这两类都参与按通道汇总；Docker / 应用宝桥接按插件轮询，不走这里。
+ */
 export async function watcherChannelPresence(env, now = Date.now()) {
   const { results } = await env.DB.prepare(`
     SELECT value_text, updated_at FROM runtime_settings
@@ -156,7 +161,8 @@ export async function watcherChannelPresence(env, now = Date.now()) {
     if (!Number.isFinite(updatedAt)) continue;
     let parsed;
     try { parsed = JSON.parse(String(row?.value_text ?? '')); } catch { continue; }
-    if (parsed?.kind !== 'android' || !Array.isArray(parsed.channel_ids)) continue;
+    if (parsed?.kind !== 'android' && parsed?.kind !== 'pc') continue;
+    if (!Array.isArray(parsed.channel_ids)) continue;
     for (const rawId of parsed.channel_ids) {
       const channelId = Number(rawId);
       if (!Number.isSafeInteger(channelId) || channelId <= 0) continue;
@@ -164,6 +170,7 @@ export async function watcherChannelPresence(env, now = Date.now()) {
       if (previous && Date.parse(previous.last_seen_at) >= updatedAt) continue;
       channels.set(channelId, {
         status: now - updatedAt < PRESENCE_TTL_MS ? 'online' : 'offline',
+        kind: parsed.kind,
         last_seen_at: new Date(updatedAt).toISOString(),
       });
     }
@@ -176,7 +183,8 @@ export async function watcherChannelPresence(env, now = Date.now()) {
  *
  * 新版监听端会直接写入 kind；已部署的应用宝桥接器实例 ID 固定以
  * `yyb-bridge-` 开头，因此旧版本也能立即被正确归类。更早的普通 Watcher
- * 没有 kind 和实例 ID，按 Docker Watcher 处理。
+ * 没有 kind 和实例 ID，按 Docker Watcher 处理。PC 监听器复用 SmsForwarder
+ * 通道上报，kind 由心跳消息里的 watcher_kind 自报。
  */
 export async function watcherSystemStatus(env, now = Date.now()) {
   const { results } = await env.DB.prepare(`

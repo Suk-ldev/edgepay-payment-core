@@ -106,6 +106,7 @@ test('Android 心跳按通道记录，但不冒充 Docker 轮询能力', async (
   assert.deepEqual([...await onlineWatcherPlugins(env, NOW)], []);
   assert.deepEqual((await watcherChannelPresence(env, NOW)).get(8), {
     status: 'online',
+    kind: 'android',
     last_seen_at: new Date(NOW).toISOString(),
   });
 
@@ -118,6 +119,49 @@ test('Android 心跳按通道记录，但不冒充 Docker 轮询能力', async (
     silentMs: 130_000,
   }]);
   assert.equal((await watcherChannelPresence(env, NOW + 130_000)).get(8).status, 'offline');
+});
+
+test('PC 监听器心跳按通道记录，与安卓实例互不冲突', async () => {
+  const env = { DB: memoryDb() };
+  await recordWatcherPresence(
+    env,
+    'watcher_presence:id:pc-8-pcwatcher-1a2b3c',
+    ['wxpay_receipt'],
+    NOW,
+    { polling: false, kind: 'pc', channelIds: [8] },
+  );
+  await recordWatcherPresence(
+    env,
+    'watcher_presence:id:android-8-phone-test-1',
+    ['wxpay_receipt~2'],
+    NOW + 1_000,
+    { polling: false, kind: 'android', channelIds: [8] },
+  );
+
+  // 同一条通道两个监听端都上报时，通道页取最近上报者的 kind。
+  assert.deepEqual((await watcherChannelPresence(env, NOW + 1_000)).get(8), {
+    status: 'online',
+    kind: 'android',
+    last_seen_at: new Date(NOW + 1_000).toISOString(),
+  });
+  const status = await watcherSystemStatus(env, NOW);
+  assert.equal(status.pc.status, 'online');
+  assert.equal(status.pc.total_instances, 1);
+  assert.deepEqual(status.pc.channel_ids, [8]);
+  assert.equal(status.android.total_instances, 1, 'PC 实例不并进安卓分组');
+
+  const stale = await staleWatcherInstances(env, NOW + 130_000);
+  assert.deepEqual(
+    stale.filter(({ kind }) => kind === 'pc'),
+    [{
+      key: 'id:pc-8-pcwatcher-1a2b3c',
+      plugins: ['wxpay_receipt'],
+      kind: 'pc',
+      channelIds: [8],
+      silentMs: 130_000,
+    }],
+    'PC 实例停报后同样进入掉线巡检，触发 watcher_offline 告警',
+  );
 });
 
 test('系统状态分别汇总 Docker、应用宝和 Android 监听端', async () => {

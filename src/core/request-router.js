@@ -1776,6 +1776,7 @@ function channelAlertLabel(registry, config, channel) {
 function watcherOfflineListenerName(kind) {
   return {
     android: 'Android到账监听',
+    pc: 'PC到账监听',
     yyb_bridge: '应用宝监听',
     docker: 'Docker监听器',
   }[kind] ?? '到账监听器';
@@ -2243,14 +2244,19 @@ async function smsForwarderChannelNotify(request, env, ctx, channel, plugin, plu
     if (signal.probe) {
       const watcherKind = String(signal.content?.watcher_kind ?? '').trim();
       const watcherInstance = String(signal.content?.watcher_instance ?? '').trim();
-      if (watcherKind === 'android' && /^[A-Za-z0-9._-]{8,40}$/u.test(watcherInstance)) {
+      // PC 监听器也复用 SmsForwarder 入口：同样的心跳、同样的按通道 presence，
+      // 只是 kind 自报为 pc。实例 ID 校验规则保持一致，避免伪造/格式异常的心跳
+      // 在 presence 里砸出无意义的行。
+      const channelListenerKinds = { android: 'android', pc: 'pc' };
+      const listenerKind = channelListenerKinds[watcherKind];
+      if (listenerKind && /^[A-Za-z0-9._-]{8,40}$/u.test(watcherInstance)) {
         const capabilities = [plugin.manifest.code];
         await recordWatcherPresence(
           env,
-          await presenceKey(`android-${channel.id}-${watcherInstance}`, capabilities),
+          await presenceKey(`${listenerKind}-${channel.id}-${watcherInstance}`, capabilities),
           capabilities,
           Date.now(),
-          { polling: false, kind: 'android', channelIds: [channel.id] },
+          { polling: false, kind: listenerKind, channelIds: [channel.id] },
         );
       }
       if (new URL(request.url).searchParams.get('legacy') === '1') {
