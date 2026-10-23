@@ -268,3 +268,30 @@ test('单插件表单拒绝不存在、未建立的副本与未授权插件', as
   const denied = await fixture({ license: { async state() { return { plugins: [] }; } } });
   assert.equal((await denied.call('/admin/api/plugins?plugin_code=wxpay_receipt')).status, 403);
 });
+
+// 写路径改成按插件补水后，保存一个插件不能再把别的插件的资产行当孤儿删掉：
+// 远端库上一张收款码 10 秒以上，误删等于把人家的收款码静默清空。
+test('按插件补水后保存另一个插件，未补水插件的资产行原样保留', async () => {
+  const { env, call, savePlugin, decrypt } = await fixture();
+  await savePlugin('wxpay_receipt', { sms_forwarder_secret: 'sms-secret', receipt_qrcode_image: QRCODE });
+  await savePlugin('fubei_receipt', {
+    receipt_terminal_no: 'terminal-2',
+    receipt_qrcode_image: `data:image/png;base64,${'F'.repeat(120_000)}`,
+  });
+  assert.equal(env.DB.settings.has(assetKey('wxpay_receipt', 'receipt_qrcode_image')), true);
+  assert.equal(env.DB.settings.has(assetKey('fubei_receipt', 'receipt_qrcode_image')), true);
+
+  // 改 fubei 的一个短字段：此时只补 fubei，wxpay 的图从未被解开。
+  await savePlugin('fubei_receipt', { receipt_terminal_no: 'terminal-3' });
+
+  assert.equal(env.DB.settings.has(assetKey('wxpay_receipt', 'receipt_qrcode_image')), true, 'wxpay 的收款码不能被当孤儿清掉');
+  const wxpayAsset = await decrypt(assetKey('wxpay_receipt', 'receipt_qrcode_image'));
+  assert.equal(wxpayAsset.value, QRCODE);
+  const fubeiAsset = await decrypt(assetKey('fubei_receipt', 'receipt_qrcode_image'));
+  assert.equal(fubeiAsset.value, `data:image/png;base64,${'F'.repeat(120_000)}`, 'fubei 自己的图也不该被重写丢掉');
+  // 主配置里两个插件的占位符都还在。
+  const config = await decrypt('plugin_config');
+  assert.equal(config.wxpay_receipt.receipt_qrcode_image, ASSET_MARKER);
+  assert.equal(config.fubei_receipt.receipt_qrcode_image, ASSET_MARKER);
+  assert.equal(config.fubei_receipt.receipt_terminal_no, 'terminal-3');
+});

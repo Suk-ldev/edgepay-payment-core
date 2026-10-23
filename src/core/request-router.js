@@ -264,33 +264,40 @@ async function hydratePluginConfig(env, config, pluginCode = '') {
   for (const [code, section] of Object.entries(config ?? {})) {
     if (pluginCode && code !== pluginCode) continue;
     if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
-    let filled = null;
-    for (const [field, value] of Object.entries(section)) {
-      if (value !== ASSET_VALUE_MARKER) continue;
-      const stored = await readEncryptedJsonSetting(
-        env,
-        pluginAssetSettingKey(code, field),
-        secret,
-        null,
-      );
-      if (!filled) filled = { ...section };
-      filled[field] = typeof stored?.value === 'string' ? stored.value : '';
-    }
-    if (filled) hydrated[code] = filled;
+    // 同一个插件的几个大字段并行读；远端库上一行 20 万字符要 10 秒以上，
+    // 串行读会把整份补水的耗时叠成超时（Query read timeout）。
+    const markers = Object.entries(section).filter(([, value]) => value === ASSET_VALUE_MARKER);
+    if (!markers.length) continue;
+    const stored = await Promise.all(markers.map(([field]) => readEncryptedJsonSetting(
+      env,
+      pluginAssetSettingKey(code, field),
+      secret,
+      null,
+    )));
+    const filled = { ...section };
+    markers.forEach(([field], index) => {
+      filled[field] = typeof stored[index]?.value === 'string' ? stored[index].value : '';
+    });
+    hydrated[code] = filled;
   }
   return hydrated;
 }
 
-/** 补过水的完整配置。写入路径必须走它，否则回写会把图片抹成占位符。 */
+/**
+ * 补过水的完整配置。写入路径必须走它，否则回写会把图片抹成占位符。
+ *
+ * `pluginCode` 版本只补一个插件：保存、复制这类单插件操作不要为了
+ * 拆分资产把其它插件的收款码也全拉一遍——远端库上那一遍就是几十秒，
+ * 拉回来又一个字节不差地写回去。
+ */
 async function runtimePluginConfigWithAssets(env, pluginCode = '') {
   return hydratePluginConfig(env, await runtimePluginConfig(env), pluginCode);
 }
 
 /**
- * 写插件配置。入参必须是补过水的完整配置。
- *
- * 拆分和落盘必须在同一个函数里，三个写入点才不会有谁漏拆——漏一次就是把
- * 几百 KB 又塞回热路径。同时清掉不再被引用的 asset 行（删插件、清空图片）。
+ * 保留现有资产行的写路径拆分：其它插件（或本插件未提交的字段）以占位符
+ * 原样透传，`splitPluginConfigAssets` 只会为真正的值建 asset 行，
+ * 占位符留在主配置里不动库。
  */
 async function writeRuntimePluginConfig(env, config) {
   const secret = settingsEncryptionSecret(env);
@@ -298,16 +305,32 @@ async function writeRuntimePluginConfig(env, config) {
   for (const [key, value] of assets) {
     await writeEncryptedJsonSetting(env, key, secret, { value });
   }
+  // 清孤儿行时只能删"主配置里连占位符都没有"的行：按插件补水后，本次没
+  // 解开图片的插件以占位符透传，它们的资产行不在 assets 里但仍然被引用，
+  // 一律保留；旧版全量补水的路径下 assets 本来就含全部图片，行为不变。
+  const retained = new Set(retainedAssetKeys(lean));
   const { results = [] } = await env.DB.prepare(
     'SELECT setting_key FROM runtime_settings WHERE setting_key LIKE ?',
   ).bind(`${PLUGIN_ASSET_PREFIX}%`).all();
   for (const row of results) {
     const key = String(row?.setting_key ?? '');
-    if (key && !assets.has(key)) {
+    if (key && !assets.has(key) && !retained.has(key)) {
       await env.DB.prepare('DELETE FROM runtime_settings WHERE setting_key = ?').bind(key).run();
     }
   }
   await writeEncryptedJsonSetting(env, 'plugin_config', secret, lean);
+}
+
+/** 主配置里仍挂着占位符的键 → 对应的资产行还在被引用。 */
+function retainedAssetKeys(lean) {
+  const keys = [];
+  for (const [pluginCode, section] of Object.entries(lean ?? {})) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
+    for (const field of Object.keys(section)) {
+      if (section[field] === ASSET_VALUE_MARKER) keys.push(pluginAssetSettingKey(pluginCode, field));
+    }
+  }
+  return keys;
 }
 
 async function runtimeChannels(env) {
@@ -3149,7 +3172,11 @@ async function duplicatePluginApi(request, env) {
     if (!licenseCovers(await licensedCodes(env), baseCode)) {
       return jsonResponse({ ok: false, error: '该插件尚未购买，请先前往 License 站购买' }, 403);
     }
-    const config = await runtimePluginConfigWithAssets(env);
+    // 复制用不到任何一张图：copyableInstanceConfig 跳过 secret 和 image，
+    // 副本的收款码由管理员自己上传。这里按骨架读（占位符原样透传），
+    // 源插件的图片既不解开、也不在写入时重写——远端库上一张图一来一回
+    // 就是几十秒，是「复制插件报 Query read timeout」的根因。
+    const config = await runtimePluginConfig(env);
     const instanceCode = pluginInstanceCode(
       baseCode,
       nextInstanceSequence(baseCode, pluginCodesWithInstances(registry, config)),
@@ -3292,8 +3319,12 @@ async function pluginConfigApi(request, env) {
     const hasEnabled = typeof body.enabled === 'boolean';
     const hasInstanceName = typeof body.instance_name === 'string';
     if (!hasValues && !hasEnabled && !hasInstanceName) throw new Error('没有可保存的插件配置');
-    const config = await runtimePluginConfigWithAssets(env);
     // 副本的存在性由配置说了算。编码是能猜出来的，不该靠猜就凭空多出一个账号位。
+    // 一律按骨架读：前端没改动的图片以占位符透传，改动的图直接换值；两种情况都
+    // 不需要解开现图——占位符算"字段存在"，资产行的清理由 splitPluginConfigAssets
+    // 按"新值进了 assets、旧键不在 retained"完成。远端库上一张图一个方向十几秒，
+    // 插件保存里就不该有任何一次图片往返。
+    const config = await runtimePluginConfig(env);
     if (isPluginInstanceCode(plugin.manifest.code) && !(plugin.manifest.code in config)) {
       throw new Error('插件副本不存在，请先在插件列表里复制一个');
     }
@@ -3307,7 +3338,18 @@ async function pluginConfigApi(request, env) {
         if (!(field.key in values)) continue;
         const raw = values[field.key];
         if (field.secret && String(raw ?? '').trim() === '') continue;
+        // 图片字段收到资产占位符 = 前端判定"没有改动"，保留现值即可。
+        // 当前值本来就是占位符（未补水）或真值，都不用动，资产行原样保留。
+        if (field.type === 'image' && String(raw ?? '') === ASSET_VALUE_MARKER) continue;
         current[field.key] = normalizedAdminField(field, raw);
+      }
+    }
+    // 保留现值的图片字段以占位符落盘：不解开真值再原样写回（远端库上一张图
+    // 一个方向就是十几秒），拆分后资产行自然命中"未变化"不重写。
+    for (const field of plugin.manifest.adminFields) {
+      if (field.type === 'image' && values && field.key in values
+        && String(values[field.key] ?? '') === ASSET_VALUE_MARKER) {
+        current[field.key] = ASSET_VALUE_MARKER;
       }
     }
     config[plugin.manifest.code] = current;

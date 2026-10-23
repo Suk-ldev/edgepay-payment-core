@@ -1333,6 +1333,13 @@ async function savePlugin(event) {
   for (const field of form.fields) {
     values[field.key] = field.type === 'multiselect' ? data.getAll(field.key) : (data.get(field.key) ?? '');
   }
+  // 图片字段没改动就不回传真身：一张收款码一百多 KB，远端库上一来一回几十秒，
+  // 是插件保存超时的主要来源。服务端认 __edgepay_asset_v1__ 为"保留现值"。
+  for (const field of form.fields) {
+    if (field.type === 'image' && values[field.key] === String(field.value ?? '')) {
+      values[field.key] = '__edgepay_asset_v1__';
+    }
+  }
   const button = pluginForm.querySelector('button[type="submit"]');
   button.disabled = true;
   button.textContent = '正在保存…';
@@ -1346,10 +1353,22 @@ async function savePlugin(event) {
         ...(instanceName ? { instance_name: instanceName.value } : {}),
       }),
     });
-    pluginForms = pluginForms.map((candidate) => candidate.code === activePluginCode ? response.form : candidate);
+    // 未改动的图片在服务端以占位符落盘（省一次几百 KB 的来回），响应表单里
+    // 自然拿不到真值；用提交前编辑器里的值把预览补回来。
+    const before = form.fields.filter((field) => field.type === 'image');
+    const mergedForm = {
+      ...response.form,
+      fields: response.form.fields.map((field) => {
+        const previous = before.find((candidate) => candidate.key === field.key);
+        return field.type === 'image' && previous && String(field.value ?? '') === '__edgepay_asset_v1__'
+          ? { ...field, value: previous.value }
+          : field;
+      }),
+    };
+    pluginForms = pluginForms.map((candidate) => candidate.code === activePluginCode ? mergedForm : candidate);
     showNotice(`${response.form.name} 配置已保存`);
     await load({ keepEditor: true });
-    renderPluginEditor(response.form);
+    renderPluginEditor(mergedForm);
   } catch (error) {
     showNotice(error.message, 'error');
   } finally {
@@ -1427,11 +1446,23 @@ async function deletePluginInstance(pluginCode, button) {
 async function setPluginEnabled(pluginCode, enabled, input) {
   input.disabled = true;
   try {
+    const previousForm = pluginForms.find((candidate) => candidate.code === pluginCode);
     const response = await request('/admin/api/plugins', {
       method: 'PUT',
       body: JSON.stringify({ plugin_code: pluginCode, enabled }),
     });
-    pluginForms = pluginForms.map((candidate) => candidate.code === pluginCode ? response.form : candidate);
+    // 开关请求不带 values，服务端按骨架读配置：响应表单里的图片是占位符，
+    // 用旧表单的真值补回来，避免下次渲染收款码预览变成破图。
+    const mergedForm = previousForm ? {
+      ...response.form,
+      fields: response.form.fields.map((field) => {
+        const previous = (previousForm.fields ?? []).find((candidate) => candidate.key === field.key);
+        return field.type === 'image' && previous && String(field.value ?? '') === '__edgepay_asset_v1__'
+          ? { ...field, value: previous.value }
+          : field;
+      }),
+    } : response.form;
+    pluginForms = pluginForms.map((candidate) => candidate.code === pluginCode ? mergedForm : candidate);
     pluginsState = pluginsState.map((candidate) => candidate.code === pluginCode ? response.plugin : candidate);
     renderPlugins();
     showNotice(`${response.plugin.name}已${enabled ? '启用' : '停用'}`);
