@@ -225,9 +225,8 @@ test('掉线巡检会把无 Worker 后备的通道停用并写回运行配置', 
   const stored = JSON.parse(rows.get('channels').value_text);
   assert.equal(stored.find(({ id }) => id === 9).enabled, false);
   assert.equal(stored.find(({ id }) => id === 10).enabled, true);
-  assert.deepEqual(JSON.parse(rows.get('watcher_failover_state').value_text).channels['9'].failures, [
-    'id:android-9-phone',
-  ]);
+  // 新模型不记实例键归属，只记停用时间；通道 9 被认领，状态行存在即可。
+  assert.ok(rows.get('watcher_failover_state').value_text.includes('"9"'), '通道 9 应处于自动停用状态');
 });
 
 test('监听器重新上线后只恢复自动停用通道，原本手动禁用的通道保持关闭', async () => {
@@ -266,24 +265,76 @@ test('监听器重新上线后只恢复自动停用通道，原本手动禁用�
   assert.equal(rows.has('watcher_failover_state'), false, '恢复完成后应清除自动停用状态');
 });
 
-test('同一通道由多个故障实例共同停用时，要等全部实例恢复才自动打开', () => {
+test('同一通道有在线实例覆盖时不再继续停用，掉线实例仍认领时保持停用', () => {
   const state = {
     version: 1,
     channels: {
-      9: { failures: ['watcher-a', 'watcher-b'], disabled_at: '2026-09-04T12:00:00.000Z' },
+      9: { failures: ['watcher-b'], disabled_at: '2026-09-04T12:00:00.000Z' },
     },
   };
   const affected = channel(9, '微信个人收款监听2', 'wxpay_receipt~2', 'wxpay', { enabled: false });
-  const stillOffline = reconcileWatcherFailoverState(state, {
+  // 仍掉线的实例本轮重新认领通道 9：即使同时有别的实例在线覆盖，
+  // 报警与恢复不在同一轮打架，通道保持停用。
+  const stillClaimed = reconcileWatcherFailoverState(state, {
     items: [{
       item: stale('android', ['wxpay_receipt~2'], [9], 'watcher-b'),
       channelsToDisable: [affected],
     }],
-  }, ['watcher-a']);
-  assert.deepEqual(stillOffline.restoreChannelIds, []);
-  assert.deepEqual(stillOffline.state.channels['9'].failures, ['watcher-b']);
+  }, [{ key: 'watcher-a', plugins: ['wxpay_receipt~2'], channelIds: [9], kind: 'android' }], new Date(), [affected]);
+  assert.deepEqual(stillClaimed.restoreChannelIds, []);
+  assert.ok(stillClaimed.state.channels['9'], '被认领的通道保持停用状态');
 
-  const allRecovered = reconcileWatcherFailoverState(stillOffline.state, { items: [] }, ['watcher-b']);
+  // 认领结束（掉线实例恢复或消失）：通道恢复，状态清空。
+  const allRecovered = reconcileWatcherFailoverState(stillClaimed.state, { items: [] }, [
+    { key: 'watcher-b', plugins: ['wxpay_receipt~2'], channelIds: [9], kind: 'android' },
+  ], new Date(), [affected]);
   assert.deepEqual(allRecovered.restoreChannelIds, [9]);
   assert.deepEqual(allRecovered.state.channels, {});
+});
+
+// 实例 ID 会变的监听端（PC 端每次启动换一个短 hash）：掉线时通道按当时的键
+// 停用，重启后新 ID 正常在线、旧 ID 永远不会回来。恢复按"通道现在有没有人
+// 管"判断，与实例 ID 无关，新 ID 一上线通道就恢复，不会被旧键永久锁住。
+test('换 ID 上线的新实例覆盖通道即恢复，旧实例键不再阻塞', () => {
+  const state = {
+    version: 1,
+    channels: {
+      10: { failures: ['id:pc-10-edgepaypc-8f3a21'], disabled_at: '2026-10-24T01:39:18.753Z' },
+    },
+  };
+  const affected = channel(10, '微信个人收款监听pc test', 'wxpay_receipt~2', 'wxpay', { enabled: false });
+
+  // 没人在线覆盖：通道保持停用（实例还在掉线）。
+  const uncovered = reconcileWatcherFailoverState(state, { items: [] }, [], new Date(), [affected]);
+  assert.deepEqual(uncovered.restoreChannelIds, []);
+
+  // 新 ID 的实例上线（旧 ID 从未回来）：通道按覆盖恢复。
+  const recovered = reconcileWatcherFailoverState(uncovered.state, { items: [] }, [
+    { key: 'id:pc-10-edgepaypc-ed0c4f0db4fc', plugins: ['wxpay_receipt~2'], channelIds: [10], kind: 'pc' },
+  ], new Date(), [affected]);
+  assert.deepEqual(recovered.restoreChannelIds, [10]);
+  assert.deepEqual(recovered.state.channels, {});
+});
+
+// 双监听器：1 号监通道 1、2 号监通道 2，两号都掉线时两个通道都停用。
+// 2 号隔了很久才回来（换了设备、ID 变了），1 号始终没上线：只恢复 2 号
+// 监听的通道 2，通道 1 没有任何人覆盖，继续停用。
+test('双监听器只恢复有在线覆盖的通道，无人管的通道继续停用', () => {
+  const now = Date.parse('2026-10-24T03:00:00.000Z');
+  const state = {
+    version: 1,
+    channels: {
+      1: { failures: ['id:android-1-phone-aaaa'], disabled_at: '2026-10-24T01:00:00.000Z' },
+      2: { failures: ['id:pc-2-pcwatcher-bbbb'], disabled_at: '2026-10-24T01:00:00.000Z' },
+    },
+  };
+  const channelOne = channel(1, '个人微信1', 'wxpay_receipt', 'wxpay', { enabled: false });
+  const channelTwo = channel(2, '个人微信2', 'wxpay_receipt~2', 'wxpay', { enabled: false });
+  const result = reconcileWatcherFailoverState(state, { items: [] }, [
+    { key: 'id:pc-2-pcwatcher-cccc', plugins: ['wxpay_receipt~2'], channelIds: [2], kind: 'pc' },
+  ], now, [channelOne, channelTwo]);
+
+  assert.deepEqual(result.restoreChannelIds, [2], '只恢复有在线覆盖的通道');
+  assert.ok(result.state.channels['1'], '通道 1 无人覆盖，继续停用');
+  assert.equal(result.state.channels['2'], undefined);
 });

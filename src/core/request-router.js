@@ -1898,8 +1898,9 @@ export async function checkWatcherLiveness(env, now = Date.now()) {
     liveWatchers,
     licensedBaseCodes: licensed,
   });
-  const liveKeys = liveWatchers.map(({ key }) => key);
-  const reconciliation = reconcileWatcherFailoverState(currentState, failovers, liveKeys, now);
+  // 恢复按通道覆盖判断，与实例 ID 无关：掉线实例只要还有别人在线覆盖
+  // （或 Worker 后备）就不停用；已停用的通道在"无人覆盖、无人认领"时恢复。
+  const reconciliation = reconcileWatcherFailoverState(currentState, failovers, liveWatchers, now, channels);
   const restoreChannelIds = new Set(reconciliation.restoreChannelIds);
   const nextChannels = failovers.nextChannels.map((channel) => (
     restoreChannelIds.has(Number(channel.id)) ? { ...channel, enabled: true } : channel
@@ -1935,7 +1936,7 @@ export async function checkWatcherLiveness(env, now = Date.now()) {
     }, { secret, now });
   }
   // 恢复销案：还在线的实例，把它上一次掉线的静默期清掉，下次再掉能立刻告警。
-  for (const key of liveKeys) await clearAlert(env, `watcher_offline:${key}`).catch(() => {});
+  for (const { key } of liveWatchers) await clearAlert(env, `watcher_offline:${key}`).catch(() => {});
 }
 
 async function licenseAttestationApi(request, env) {
