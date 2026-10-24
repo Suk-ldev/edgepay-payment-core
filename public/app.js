@@ -484,12 +484,16 @@ async function saveSiteConfig(event) {
   }
 }
 
-/** 通道页监听端在线标签：安卓和 PC 走同一条 SmsForwarder 通道，文案按 kind 区分。 */
+/**
+ * 通道页监听端在线标签：安卓和 PC 走同一条 SmsForwarder 通道，文案按 kind 区分。
+ * 「未收到心跳」不点明设备类型——没报过 kind 的旧监听端、安卓、PC 都可能，
+ * 通道页这里不替用户猜。
+ */
 function channelPresenceLabel(presence) {
   const isPc = presence.kind === 'pc';
   const labels = isPc
-    ? { online: 'PC 在线', offline: 'PC 离线', unknown: '未收到 PC 心跳' }
-    : { online: '手机在线', offline: '手机离线', unknown: '未收到手机心跳' };
+    ? { online: 'PC 在线', offline: 'PC 离线', unknown: '未收到心跳' }
+    : { online: '手机在线', offline: '手机离线', unknown: '未收到心跳' };
   return labels[presence.status] ?? labels.unknown;
 }
 
